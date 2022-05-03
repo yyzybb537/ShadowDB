@@ -32,7 +32,23 @@ struct ProcessInfo {
     int64_t scriptVersion;
     string scriptKey;
     string nodeName;
+
+    // 给存储在数据库中的结构体增加一个toString函数, 可以在打印数据库全量信息时更详细
+    string toString()
+    {
+        return ::shadow::fmt("id={%d,%d},script=\"%s\",version=%ld,key=\"%s\",node=\"%s\"",
+                id.v1, id.v2, scriptName.c_str(), scriptVersion,
+                scriptKey.c_str(), nodeName.c_str());
+    }
 };
+
+// 使用下面这个宏, 可以让输出的debug信息更详细
+SHADOW_DB_DEBUG_FIELD(ProcessInfo, id);
+SHADOW_DB_DEBUG_FIELD(ProcessInfo, processUUID);
+SHADOW_DB_DEBUG_FIELD(ProcessInfo, scriptName);
+SHADOW_DB_DEBUG_FIELD(ProcessInfo, scriptVersion);
+SHADOW_DB_DEBUG_FIELD(ProcessInfo, scriptKey);
+SHADOW_DB_DEBUG_FIELD(ProcessInfo, nodeName);
 
 std::vector<ProcessInfo> gData = {
     {{0, 0}, "11becf19-97fe-4683-9b8e-fc52c933c7bc", "b.cc", 1, "mips-b-1", "192.168.0.1"},
@@ -72,6 +88,12 @@ int main()
 
     // 打印查询细节
     cout << dbg.toString() << endl;
+
+    // 此外还可以打印数据库的信息
+    // 全量信息
+    cout << "db detail:\n" << db.toString() << endl;
+    // 简略信息(不打印具体数据)
+    cout << "db simple:\n" << db.toString(true) << endl;
 
     return 0;
 }
