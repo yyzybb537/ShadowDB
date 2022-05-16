@@ -9,6 +9,7 @@
 #include <iostream>
 #include <climits>
 #include <queue>
+#include <chrono>
 #include <algorithm>
 #include <unordered_map>
 #include <string.h>
@@ -103,14 +104,13 @@ namespace adl {
     struct SHADOW_DB_DEBUG_FIELD__ ## V ## F                        \
     {                                                               \
         SHADOW_DB_DEBUG_FIELD__ ## V ## F () {                      \
-            ::shadow::adl::register_to_string(&V::F, #V "::" #F);   \
+            ::shadow::adl::register_to_string<V>(&V::F, #V "::" #F);\
         }                                                           \
     } gShadowDBDebugRegister_ ## V ## F
 
-    template <typename V, typename F>
-    string field_to_string(F V::* memptr)
+    template <typename V>
+    string field_to_string(size_t offset)
     {
-        size_t offset = reinterpret_cast<size_t>(&(((V*)0) ->* memptr));
         map<size_t, string> & m = field_maps<V>();
         auto it = m.find(offset);
         return (m.end() == it) ? "" : it->second;
@@ -120,12 +120,12 @@ namespace adl {
 string P(const char* fmt = "", ...)  __attribute__((format(printf,1,2)));
 string fmt(const char* fmt = "", ...)  __attribute__((format(printf,1,2)));
 
-size_t & tlsTab() {
+inline size_t & tlsTab() {
     static thread_local size_t t = 0;
     return t;
 }
 
-string P(const char* fmt, ...)
+inline string P(const char* fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
@@ -141,7 +141,7 @@ string P(const char* fmt, ...)
     return std::string(buf, len + 1);
 }
 
-string fmt(const char* fmt, ...)
+inline string fmt(const char* fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
@@ -163,7 +163,7 @@ enum class e_cond_op : char
     ne = 6, // !=
 };
 
-const char* e_cond_op_2_str(e_cond_op op)
+inline const char* e_cond_op_2_str(e_cond_op op)
 {
     switch ((int)op)
     {
@@ -195,23 +195,25 @@ struct Debugger
         string indexName;
         size_t nLeftMatched = 0;    // 最左匹配
         size_t nMatchedCond = 0;    // 匹配到的条件数量
+        bool   bOrderByMatched = false;  // orderby是否最左前缀匹配
         size_t nForkLevels = 0;     // 数据层数
         size_t nScanIndexKeys = 0;  // 遍历过的索引key
         size_t nScanRows = 0;       // 遍历过的数据行
         size_t nResultRows = 0;     // 返回的结果行数
 
-        string toString(bool matched = false)
+        string toString(bool matched = false) const
         {
             string s;
             s += P("[%s]", indexName.c_str());
             ++tlsTab();
-            s += P("left-matched: %d", (int)nLeftMatched);
-            s += P("matched-cond: %d", (int)nMatchedCond);
-            s += P("fork-levels:  %d", (int)nForkLevels);
+            s += P("left-matched:     %d", (int)nLeftMatched);
+            s += P("matched-cond:     %d", (int)nMatchedCond);
+            s += P("order-by-matched: %d", (int)bOrderByMatched);
             if (matched) {
-                s += P("scan-index-k: %d", (int)nScanIndexKeys);
-                s += P("scan-rows:    %d", (int)nScanRows);
-                s += P("result-rows:  %d", (int)nResultRows);
+                s += P("fork-levels:      %d", (int)nForkLevels);
+                s += P("scan-index-k:     %d", (int)nScanIndexKeys);
+                s += P("scan-rows:        %d", (int)nScanRows);
+                s += P("result-rows:      %d", (int)nResultRows);
             }
             --tlsTab();
             return s;
@@ -225,7 +227,7 @@ struct Debugger
         std::vector<IndexHintInfo> tryMatchIndexes;
         IndexHintInfo matched;
 
-        string toString()
+        string toString() const
         {
             string s;
             s += P("cond: %s", cond.c_str());
@@ -251,30 +253,44 @@ struct Debugger
         string or_cond;
         string optimizedCond;
         std::list<OnceIndexQueryTrace> querys;
+        int64_t beginTimestampUS = 0;
+        int64_t endTimestampUS = 0;
+
+        static int64_t us()
+        {
+            return std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+        }
 
         // 遍历过的索引key
-        size_t getScanIndexKeys() {
+        size_t getScanIndexKeys() const {
             size_t n = 0;
-            for (auto & q : querys)
+            for (auto const& q : querys)
                 n += q.matched.nScanIndexKeys;
             return n;
         }
 
         // 遍历过的数据行
-        size_t getScanRows() {
+        size_t getScanRows() const {
             size_t n = 0;
-            for (auto & q : querys)
+            for (auto const& q : querys)
                 n += q.matched.nScanRows;
             return n;
         }
 
 
         // 返回的结果行数
-        size_t getResultRows() {
+        size_t getResultRows() const {
             size_t n = 0;
-            for (auto & q : querys)
+            for (auto const& q : querys)
                 n += q.matched.nResultRows;
             return n;
+        }
+
+        // 查询耗时(us)
+        int64_t queryCostUS() const
+        {
+            return (endTimestampUS ? endTimestampUS : us()) - beginTimestampUS;
         }
 
         OnceIndexQueryTrace* newQuery()
@@ -283,9 +299,10 @@ struct Debugger
             return &querys.back();
         }
 
-        string toString()
+        string toString() const
         {
             string s;
+            s += P("time:           %ld us", queryCostUS());
             s += P("cond:           %s", or_cond.c_str());
             s += P("optimized-cond: %s", optimizedCond.c_str());
             s += P("scan-index-k:   %d", (int)getScanIndexKeys());
@@ -350,11 +367,11 @@ public:
             return *this;
         }
 
-        string toString()
+        string toString() const
         {
             string s;
             s = fmt("%s{%s}", deleted ? "(D)" : "",
-                    adl::to_string(static_cast<V&>(*this)).c_str());
+                    adl::to_string(static_cast<V const&>(*this)).c_str());
             return s;
         }
 
@@ -373,7 +390,7 @@ public:
     virtual void forBaseTable(table_t & table) {}         // 初始化成底层table, 上层还有logs(不清理数据)
     virtual void forLogsTable(table_t & table) {}         // 初始化成顶层table(不清理数据)
     virtual void mergeTable(table_t & from, table_t & to) = 0;   // 覆盖合并
-    virtual string tableToString(table_t & table, bool simple) = 0;
+    virtual string tableToString(table_t & table, bool simple) const = 0;
 
     void reset() {
         levels_.clear();
@@ -435,17 +452,17 @@ public:
         levels_.push_back(htp);
     }
 
-    size_t level() {
+    size_t level() const {
         return levels_.size();
     }
 
-    string toString(bool simple = false)
+    string toString(bool simple = false) const
     {
         string s;
         s += P("[Shadow-Table] (level=%d)", (int)level());
         ++tlsTab();
         for (size_t i = 0; i < level(); ++i) {
-            table_ptr & tp = table(i);
+            table_ptr const& tp = table(i);
             s += P("[%d](ref=%d)(0x%p) %s",
                     (int)i, (int)tp.use_count(), (void*)tp.get(),
                     (i == 0) ? "-> top" : "");
@@ -464,6 +481,12 @@ protected:
     }
 
     inline table_ptr & table(size_t lv)
+    {
+        assert(lv < levels_.size());
+        return levels_[levels_.size() - lv - 1];
+    }
+
+    inline table_ptr const& table(size_t lv) const
     {
         assert(lv < levels_.size());
         return levels_[levels_.size() - lv - 1];
@@ -521,7 +544,7 @@ public:
             return lhs.key == rhs.key;
         }
 
-        string toString()
+        string toString() const
         {
             string s;
             s += fmt("{key=%s, bc=%d, bi=%d}",
@@ -686,6 +709,13 @@ public:
         vs.deleted = false;
     }
 
+    void set(K const& key, V && value)
+    {
+        VStorage & vs = (*logs())[key];
+        static_cast<V&>(vs) = std::move(value);
+        vs.deleted = false;
+    }
+
     void del(K const& key)
     {
         if (level() == 1) {
@@ -791,7 +821,7 @@ protected:
         }
     }
 
-    virtual string tableToString(table_t & table, bool simple) override
+    virtual string tableToString(table_t & table, bool simple) const override
     {
         string s;
         s += P("Hashtable[size=%d bucket=%d load_factor=%.3f max_load_factor=%.3f]",
@@ -1061,7 +1091,7 @@ public:
         explicit condition_iterator(this_t * t,
                 std::shared_ptr<condition_vec2_t> cv2,
                 Debugger::IndexHintInfo* pIndexHintInfo)
-            : self(t), condv2(cv2), indexHintInfo(pIndexHintInfo) {}
+            : self(t), indexHintInfo(pIndexHintInfo), condv2(cv2) {}
 
         condition_iterator(condition_iterator && other) = default;
         condition_iterator& operator=(condition_iterator && other) = default;
@@ -1310,10 +1340,10 @@ public:
                 map_range_iterator & mrIter = mapRangeItrs.back();
                 mrIter.range.swap(range);
                 mrIter.it = mrIter.range[0].first;
-                onScan();
 
-                for (; mrIter; ++mrIter, onScan()) {
+                for (; mrIter; ++mrIter) {
                     // 最后一次递归中, next其实是一个set_t*
+                    onScan();
                     map_t * next = reinterpret_cast<map_t*>(mrIter.get()->second);
                     if (begin(next, depth + 1)) {
                         return true;
@@ -1344,7 +1374,6 @@ public:
             // if (depth == self->depth_ + 1)
             set_t * s = reinterpret_cast<set_t*>(m);
             setItr = s->begin();
-            onScan();
             return true;
         }
 
@@ -1356,9 +1385,9 @@ public:
             assert(mapRangeItrs.size() == self->depth_ + 1);
             set_t * s = reinterpret_cast<set_t*>(mapRangeItrs.back().get()->second);
             ++setItr;
-            onScan();
-            if (s->end() != setItr)
+            if (s->end() != setItr) {
                 return ;
+            }
 
             // 逐层回退, ++
             while (!mapRangeItrs.empty()) {
@@ -1366,8 +1395,8 @@ public:
 
                 assert(!!mrIter);
                 ++mrIter;
-                onScan();
-                for (; mrIter; ++mrIter, onScan()) {
+                for (; mrIter; ++mrIter) {
+                    onScan();
                     if (begin(reinterpret_cast<map_t*>(mrIter.get()->second), mapRangeItrs.size()))
                         return ;
                 }
@@ -1516,12 +1545,12 @@ public:
         }
     }
 
-    bool empty()
+    bool empty() const
     {
         return m_.empty();
     }
 
-    size_t size()
+    size_t size() const
     {
         return size_;
     }
@@ -1544,7 +1573,7 @@ public:
         return std::move(it);
     }
 
-    string toString(bool simple = false)
+    string toString(bool simple = false) const
     {
         string s;
         s += P("RecursiveMapSet [depth=%d keys.depth=%d size=%d]",
@@ -1558,7 +1587,7 @@ public:
         return s;
     }
 
-    string toString(map_t* m, size_t depth)
+    string toString(map_t const* m, size_t depth) const
     {
         string s;
         if (depth < depth_ + 1) {
@@ -1579,7 +1608,7 @@ public:
         }
 
         // set
-        set_t * sp = reinterpret_cast<set_t*>(m);
+        set_t const* sp = reinterpret_cast<set_t const*>(m);
 //        s += P("set[%d] [size=%d]", (int)depth, (int)sp->size());
         ++tlsTab();
         int i = 0;
@@ -1863,7 +1892,7 @@ protected:
         }
     }
 
-    virtual string tableToString(table_t & table, bool simple) override
+    virtual string tableToString(table_t & table, bool simple) const override
     {
         string s;
         s = table.toString(simple);
@@ -1910,6 +1939,7 @@ public:
         } else {
             u_ = other.u_;
         }
+        return *this;
     }
 
     LessAny(LessAny && other) {
@@ -1929,6 +1959,7 @@ public:
         }
 
         other.type_ = e_simple_types::e_unseted;
+        return *this;
     }
 
     ~LessAny() {
@@ -1959,7 +1990,7 @@ public:
         }
     }
 
-    string toString()
+    string toString() const
     {
         switch ((char)type_) {
             case (char)e_simple_types::e_unseted:
@@ -1980,6 +2011,8 @@ public:
             case (char)e_simple_types::e_max:
                 return "e_max";
         }
+
+        return "Unknown LessAny";
     }
 
     void reset()
@@ -2036,7 +2069,7 @@ private:
         virtual ~base_t() {}
         virtual bool less(base_t* other) const = 0;
         virtual base_t* clone() const = 0;
-        virtual string toString() = 0;
+        virtual string toString() const = 0;
     };
 
     template <typename T>
@@ -2055,7 +2088,7 @@ private:
             return new storage(value_);
         }
 
-        string toString() override
+        string toString() const override
         {
             return adl::to_string(value_);
         }
@@ -2073,414 +2106,856 @@ private:
     string str_;
 };
 
-template <typename V>
-struct DB_Base
+// 存储只增不删、支持resetTop的小顶堆
+template <typename T>
+struct Heap
 {
 public:
-    // 单列:值
-    typedef LessAny column_value_t;
-
-    // 单列:元信息
-    struct column_t
+    T& top()
     {
-        size_t offset = -1;
-        std::function<column_value_t(V const&)> getter;
-        std::function<void(V const& from, V& to)> assign;
-        std::function<string()> fieldname;
+        return storage_[heap_[0]];
+    }
 
-        column_t() = default;
-        column_t(column_t const&) = default;
-        column_t(column_t &&) = default;
-        column_t& operator=(column_t const&) = default;
-        column_t& operator=(column_t &&) = default;
-
-        template <typename FieldType>
-        column_t(FieldType V::* memptr)
-        {
-            offset = reinterpret_cast<size_t>(&(((V*)0) ->* memptr));
-            getter = [memptr](V const& v) {
-                LessAny la;
-                la.set(v.*memptr);
-                return la;
-            };
-            assign = [memptr](V const& from, V & to) {
-                to.*memptr = from.*memptr;
-            };
-            fieldname = [memptr]() {
-                return adl::field_to_string<V>(memptr);
-            };
-        }
-
-        friend bool operator<(column_t const& lhs, column_t const& rhs) {
-            return lhs.offset < rhs.offset;
-        }
-
-        friend bool operator==(column_t const& lhs, column_t const& rhs) {
-            return lhs.offset == rhs.offset;
-        }
-    };
-
-    // ------------------ 查询条件
-    // 查询条件(单个)
-    struct condition_t
+    bool empty() const
     {
-        e_cond_op op_;
-        column_t col_;
-        column_value_t colValue_;
+        return heap_.empty();
+    }
 
-        condition_t() = default;
-        condition_t(condition_t const&) = default;
-        condition_t(condition_t &&) = default;
-        condition_t& operator=(condition_t const&) = default;
-        condition_t& operator=(condition_t &&) = default;
+    size_t size() const
+    {
+        return heap_.size();
+    }
 
-        template <typename FieldType>
-        condition_t(FieldType V::* memptr, e_cond_op op, FieldType value)
-            : op_(op), col_(memptr)
-        {
-            colValue_.set(value);
-        }
+    template <typename ... Args>
+    void push(Args && ... args)
+    {
+        storage_.emplace_back(std::forward<Args>(args)...);
+        heap_.push_back(storage_.size() - 1);
+        std::push_heap(heap_.begin(), heap_.end(), [this](size_t lhs, size_t rhs){ return greater(lhs, rhs); });
+    }
 
-        string toString()
-        {
-            return fmt("Cond(&%s) %s %s",
-                    col_.fieldname().c_str(), e_cond_op_2_str(op_),
-                    colValue_.toString().c_str());
-        }
+    void pop()
+    {
+        std::pop_heap(heap_.begin(), heap_.end(), [this](size_t lhs, size_t rhs){ return greater(lhs, rhs); });
+        heap_.resize(heap_.size() - 1);
+    }
 
-        friend bool operator<(condition_t const& lhs, condition_t const& rhs) {
-            return lhs.col_ < rhs.col_;
-        }
+    void resetTop()
+    {
+        std::pop_heap(heap_.begin(), heap_.end(), [this](size_t lhs, size_t rhs){ return greater(lhs, rhs); });
+        std::push_heap(heap_.begin(), heap_.end(), [this](size_t lhs, size_t rhs){ return greater(lhs, rhs); });
+    }
 
-        bool check(V const& value)
-        {
-            // todo: 优化成指针形式的getter
-            column_value_t colValue = col_.getter(value);
-            switch ((int)op_) {
-            case (int)e_cond_op::lt:
-                return colValue < colValue_;
-            case (int)e_cond_op::le:
-                return !(colValue_ < colValue);
-            case (int)e_cond_op::eq:
-                return !(colValue_ < colValue) && !(colValue < colValue_);
-            case (int)e_cond_op::ge:
-                return !(colValue < colValue_);
-            case (int)e_cond_op::gt:
-                return colValue_ < colValue;
+private:
+    bool greater(size_t lhs, size_t rhs)
+    {
+        return storage_[rhs] < storage_[lhs];
+    }
 
-            default:
-            case (int)e_cond_op::ne:
-                return (colValue_ < colValue) || (colValue < colValue_);
-            }
-        }
-    };
+private:
+    std::vector<T> storage_;
+    std::vector<size_t> heap_;
+};
 
-    // 语法糖辅助类
+// 单列:值
+typedef LessAny column_value_t;
+
+// 单列:元信息
+template <typename V>
+struct column_t
+{
+    static const size_t kInvalidOffset = -1;
+
+    size_t offset = kInvalidOffset;
+    std::function<column_value_t(V const&)> getter;
+    std::function<void(V const& from, V& to)> assign;
+
+    column_t() = default;
+    column_t(column_t const&) = default;
+    column_t(column_t &&) = default;
+    column_t& operator=(column_t const&) = default;
+    column_t& operator=(column_t &&) = default;
+
     template <typename FieldType>
-    struct field_t
+    column_t(FieldType V::* memptr)
     {
-        FieldType V::* memptr_;
-
-        explicit field_t(FieldType V::* memptr) : memptr_(memptr) {}
-
-        friend condition_t operator<(field_t field, FieldType value)
-        {
-            return condition_t{field.memptr_, e_cond_op::lt, value};
-        }
-
-        friend condition_t operator<=(field_t field, FieldType value)
-        {
-            return condition_t{field.memptr_, e_cond_op::le, value};
-        }
-
-        friend condition_t operator==(field_t field, FieldType value)
-        {
-            return condition_t{field.memptr_, e_cond_op::eq, value};
-        }
-
-        friend condition_t operator>=(field_t field, FieldType value)
-        {
-            return condition_t{field.memptr_, e_cond_op::ge, value};
-        }
-
-        friend condition_t operator>(field_t field, FieldType value)
-        {
-            return condition_t{field.memptr_, e_cond_op::gt, value};
-        }
-
-        friend condition_t operator!=(field_t field, FieldType value)
-        {
-            return condition_t{field.memptr_, e_cond_op::ne, value};
-        }
-    };
-
-    // 一组&&查询条件
-    // {&A::a == 1 && &A::b < 2}
-    // {Cond(&A::a) == 1 && Cond(&A::b) < 2}
-    struct condition_and_group
-    {
-        vector<condition_t> and_;
-
-        condition_and_group() = default;
-
-        condition_and_group(condition_t && c1)
-            : and_{c1} {}
-
-        condition_and_group(condition_t && c1, condition_t && c2)
-            : and_{c1, c2} {}
-
-        string toString()
-        {
-            string s;
-            int i = 0;
-            for (condition_t & cond : and_) {
-                ++i;
-                s += cond.toString();
-                if (i != and_.size())
-                    s += " && ";
-            }
-            return s;
-        }
-
-        void sort()
-        {
-            std::sort(and_.begin(), and_.end());
-        }
-
-        bool check(V const& value)
-        {
-            for (condition_t & cond : and_) {
-                if (!cond.check(value))
-                    return false;
-            }
-            return true;
-        }
-    };
-
-    // && ||复合查询条件
-    // {&A::a == 1 && &A::b < 2 || &A::c > 3}
-    // {Cond(&A::a) == 1 && Cond(&A::b) < 2 || Cond(&A::c) > 3}
-    struct condition_or_group
-    {
-        vector<condition_and_group> or_;
-
-        condition_or_group() = default;
-
-        condition_or_group(condition_t && c1)
-            : or_{condition_and_group{std::move(c1)}} {}
-
-        condition_or_group(condition_and_group && g1)
-            : or_{g1} {}
-
-        condition_or_group(condition_and_group && g1, condition_and_group && g2)
-            : or_{g1, g2}{}
-
-        string toString()
-        {
-            string s;
-            int i = 0;
-            for (condition_and_group & and_group : or_) {
-                ++i;
-                s += and_group.toString();
-                if (i != or_.size())
-                    s += " || ";
-            }
-            return s;
-        }
-    };
-
-    // -------- cond
-    // cond && cond
-    friend condition_and_group operator&&(condition_t && c1, condition_t && c2)
-    {
-        return condition_and_group(std::move(c1), std::move(c2));
+        offset = reinterpret_cast<size_t>(&(((V*)0) ->* memptr));
+        getter = [memptr](V const& v) {
+            LessAny la;
+            la.set(v.*memptr);
+            return la;
+        };
+        assign = [memptr](V const& from, V & to) {
+            to.*memptr = from.*memptr;
+        };
     }
 
-    // cond && and_group
-    friend condition_and_group && operator&&(condition_t && c1, condition_and_group && c2)
+    template <typename FieldType, typename VBase>
+    column_t(FieldType VBase::* memptr)
+        : column_t(static_cast<FieldType V::*>(memptr))
     {
-        return std::move(c2) && std::move(c1);
     }
 
-    // cond || cond
-    friend condition_or_group operator||(condition_t && c1, condition_t && c2)
+    template <typename T>
+    column_t(column_t<T> const& other)
     {
-        return condition_or_group(condition_and_group(std::move(c1)),
-                condition_and_group(std::move(c2)));
+        static_assert(std::is_base_of<T, V>::value, "");
+
+        offset = other.offset + offsetVBase<T>();
+        getter = [other](V const& v) {
+            return other.getter(static_cast<T const&>(v));
+        };
+        assign = [other](V const& from, V & to) {
+            other.assign(static_cast<T const&>(from), static_cast<V&>(to));
+        };
     }
 
-    // cond || and_group
-    friend condition_or_group operator||(condition_t && c1, condition_and_group && c2)
+    template <typename VBase>
+    static size_t offsetVBase()
     {
-        return std::move(c2) || std::move(c1);
+        return (size_t)static_cast<VBase*>((V*)0x1) - 1;
     }
 
-    // cond || or_group
-    friend condition_or_group && operator||(condition_t && c1, condition_or_group && c2)
-    {
-        return std::move(c2) || std::move(c1);
+    bool isValid() const {
+        return offset != kInvalidOffset && getter && assign;
     }
 
-    // -------- and_group
-    // and_group && cond
-    friend condition_and_group && operator&&(condition_and_group && c1, condition_t && c2)
-    {
-        c1.and_.emplace_back(std::move(c2));
-        return std::move(c1);
+    friend bool operator<(column_t const& lhs, column_t const& rhs) {
+        return lhs.offset < rhs.offset;
     }
 
-    // and_group && and_group
-    friend condition_and_group && operator&&(condition_and_group && c1, condition_and_group && c2)
+    friend bool operator==(column_t const& lhs, column_t const& rhs) {
+        return lhs.offset == rhs.offset;
+    }
+
+    friend bool operator!=(column_t const& lhs, column_t const& rhs) {
+        return !(lhs.offset == rhs.offset);
+    }
+
+    string toString() const
     {
-        for (condition_t & c : c2.and_) {
-            c1.and_.emplace_back(std::move(c));
+        string name = adl::field_to_string<V>(offset);
+        return name.empty() ? fmt("offset=%d", (int)offset) : fmt("&%s", name.c_str());
+    }
+};
+
+// 虚拟列:元信息
+template <typename V>
+struct virtual_column_t : public column_t<V>
+{
+    std::shared_ptr<int> id;
+    string name;
+
+    virtual_column_t() = default;
+
+    virtual_column_t(column_t<V> const& base) : column_t<V>(base) {}
+    virtual_column_t(column_t<V> && base) : column_t<V>(std::move(base)) {}
+
+    template <typename FieldType>
+    virtual_column_t(FieldType V::* memptr) : column_t<V>(memptr) {}
+
+    template <typename FieldType, typename VBase>
+    virtual_column_t(FieldType VBase::* memptr) : column_t<V>(memptr) {}
+
+    template <typename T>
+    virtual_column_t(virtual_column_t<T> const& ct) : column_t<V>(ct) {}
+
+    template <typename T>
+    virtual_column_t(column_t<T> const& ct) : column_t<V>(ct) {}
+
+    template <typename T>
+    static virtual_column_t make(std::function<T(V const&)> const& fn,
+            string const& name = "")
+    {
+        virtual_column_t vct;
+        vct.id.reset(new int(0xf));
+        vct.getter = [fn](V const& v) {
+            LessAny la;
+            la.set(fn(v));
+            return la;
+        };
+        vct.name = name;
+        return vct;
+    }
+
+    bool isValid() const {
+        return !!id || column_t<V>::isValid();
+    }
+
+    bool isVirtualColumn() const {
+        return !!id;
+    }
+
+    friend bool operator<(virtual_column_t const& lhs, virtual_column_t const& rhs) {
+        if (lhs.offset != rhs.offset)
+            return lhs.offset < rhs.offset;
+        return lhs.id < rhs.id;
+    }
+
+    friend bool operator==(virtual_column_t const& lhs, virtual_column_t const& rhs) {
+        return lhs.offset == rhs.offset && lhs.id == rhs.id;
+    }
+
+    string toString() const
+    {
+        if (isVirtualColumn()) {
+            return name;
         }
-        c2.and_.clear();
-        return std::move(c1);
+
+        return column_t<V>::toString();
+    }
+};
+
+// ------------------ 查询条件
+// 查询条件(单个)
+template <typename V>
+struct condition_t
+{
+    virtual_column_t<V> col_;
+    e_cond_op op_;
+    column_value_t colValue_;
+
+    condition_t() = default;
+    condition_t(condition_t const&) = default;
+    condition_t(condition_t &&) = default;
+    condition_t& operator=(condition_t const&) = default;
+    condition_t& operator=(condition_t &&) = default;
+
+    condition_t(virtual_column_t<V> && col, e_cond_op op, column_value_t && value)
+        : col_(std::move(col)), op_(op), colValue_(std::move(value))
+    {
     }
 
-    // and_group && or_group
-    friend condition_or_group && operator&&(condition_and_group && c1, condition_or_group && c2)
+    template <typename T>
+    condition_t(condition_t<T> const& cond)
+        : col_(cond.col_), op_(cond.op_), colValue_(cond.colValue_)
     {
-        return std::move(c2) && std::move(c1);
+        static_assert(std::is_base_of<T, V>::value, "");
     }
 
-    // and_group || cond
-    friend condition_or_group operator||(condition_and_group && c1, condition_t && c2)
+    string toString() const
     {
-        return condition_or_group(std::move(c1), condition_and_group(std::move(c2)));
+        return fmt("Cond(%s) %s %s",
+                col_.toString().c_str(), e_cond_op_2_str(op_),
+                colValue_.toString().c_str());
     }
 
-    // and_group || and_group
-    friend condition_or_group operator||(condition_and_group && c1, condition_and_group && c2)
-    {
-        return condition_or_group(std::move(c1), std::move(c2));
+    friend bool operator<(condition_t const& lhs, condition_t const& rhs) {
+        return lhs.col_ < rhs.col_;
     }
 
-    // and_group || or_group
-    friend condition_or_group && operator||(condition_and_group && c1, condition_or_group && c2)
+    condition_t operator!()
     {
-        return std::move(c2) || std::move(c1);
-    }
+        condition_t<V> ct(*this);
+        switch ((int)ct.op_) {
+        case (int)e_cond_op::lt:
+            ct.op_ = e_cond_op::ge;
+            break;
 
-    // -------- or_group
-    // or_group && cond
-    friend condition_or_group && operator&&(condition_or_group && c1, condition_t && c2)
-    {
-        for (condition_and_group & ag : c1.or_) {
-            condition_t c = c2;
-            std::move(ag) && std::move(c);
+        case (int)e_cond_op::le:
+            ct.op_ = e_cond_op::gt;
+            break;
+
+        case (int)e_cond_op::eq:
+            ct.op_ = e_cond_op::ne;
+            break;
+
+        case (int)e_cond_op::ge:
+            ct.op_ = e_cond_op::lt;
+            break;
+
+        case (int)e_cond_op::gt:
+            ct.op_ = e_cond_op::le;
+            break;
+
+        case (int)e_cond_op::ne:
+            ct.op_ = e_cond_op::eq;
+            break;
         }
-        return std::move(c1);
+
+        return ct;
     }
 
-    // or_group && and_group
-    friend condition_or_group && operator&&(condition_or_group && c1, condition_and_group && c2)
+    bool check(V const& value)
     {
-        for (condition_and_group & ag : c1.or_) {
-            condition_and_group c = c2;
-            std::move(ag) && std::move(c);
+        // todo: 优化成指针形式的getter
+        column_value_t colValue = col_.getter(value);
+        switch ((int)op_) {
+        case (int)e_cond_op::lt:
+            return colValue < colValue_;
+        case (int)e_cond_op::le:
+            return !(colValue_ < colValue);
+        case (int)e_cond_op::eq:
+            return !(colValue_ < colValue) && !(colValue < colValue_);
+        case (int)e_cond_op::ge:
+            return !(colValue < colValue_);
+        case (int)e_cond_op::gt:
+            return colValue_ < colValue;
+
+        default:
+        case (int)e_cond_op::ne:
+            return (colValue_ < colValue) || (colValue < colValue_);
         }
-        return std::move(c1);
+    }
+};
+
+// 语法糖辅助类
+template <typename V, typename FieldType>
+struct field_t
+{
+    virtual_column_t<V> col_;
+
+    explicit field_t(FieldType V::* memptr) : col_(memptr) {}
+
+    // 这里要copy一次, 以免VirtualColumn的内容被move改写
+    explicit field_t(virtual_column_t<V> const& col) : col_(col) {}
+
+    friend condition_t<V> operator<(field_t field, FieldType value)
+    {
+        column_value_t la;
+        la.set(value);
+        return condition_t<V>{std::move(field.col_), e_cond_op::lt, std::move(la)};
     }
 
-    // or_group || cond
-    friend condition_or_group && operator||(condition_or_group && c1, condition_t && c2)
+    friend condition_t<V> operator<=(field_t field, FieldType value)
     {
-        c1.or_.emplace_back(std::move(condition_and_group(std::move(c2))));
-        return std::move(c1);
+        column_value_t la;
+        la.set(value);
+        return condition_t<V>{std::move(field.col_), e_cond_op::le, std::move(la)};
     }
 
-    // or_group || and_group
-    friend condition_or_group && operator||(condition_or_group && c1, condition_and_group && c2)
+    friend condition_t<V> operator==(field_t field, FieldType value)
     {
-        c1.or_.emplace_back(std::move(c2));
-        return std::move(c1);
+        column_value_t la;
+        la.set(value);
+        return condition_t<V>{std::move(field.col_), e_cond_op::eq, std::move(la)};
     }
 
-    // or_group || or_group
-    friend condition_or_group && operator||(condition_or_group && c1, condition_or_group && c2)
+    friend condition_t<V> operator>=(field_t field, FieldType value)
     {
-        c1.or_.emplace(c2.or_.begin(), c2.or_.end());
-        return std::move(c1);
+        column_value_t la;
+        la.set(value);
+        return condition_t<V>{std::move(field.col_), e_cond_op::ge, std::move(la)};
     }
-    // ------------------ 查询条件
 
-    // ------------------ 索引
-    // 索引:元信息
-    struct index_meta_t
+    friend condition_t<V> operator>(field_t field, FieldType value)
     {
-        vector<column_t> cols;
+        column_value_t la;
+        la.set(value);
+        return condition_t<V>{std::move(field.col_), e_cond_op::gt, std::move(la)};
+    }
 
-        friend bool operator<(index_meta_t const& lhs, index_meta_t const& rhs)
+    friend condition_t<V> operator!=(field_t field, FieldType value)
+    {
+        column_value_t la;
+        la.set(value);
+        return condition_t<V>{std::move(field.col_), e_cond_op::ne, std::move(la)};
+    }
+};
+
+// 一组&&查询条件
+// {&A::a == 1 && &A::b < 2}
+// {Cond(&A::a) == 1 && Cond(&A::b) < 2}
+template <typename V>
+struct condition_and_group
+{
+    vector<condition_t<V>> and_;
+
+    condition_and_group() = default;
+    condition_and_group(condition_and_group const&) = default;
+    condition_and_group(condition_and_group &&) = default;
+    condition_and_group& operator=(condition_and_group const&) = default;
+    condition_and_group& operator=(condition_and_group &&) = default;
+
+    condition_and_group(condition_t<V> const& c1)
+        : and_{c1} {}
+
+    condition_and_group(condition_t<V> const& c1, condition_t<V> const& c2)
+        : and_{c1, c2} {}
+
+    template <typename T>
+    condition_and_group(condition_t<T> const& other)
+        : and_{other}
+    {
+        static_assert(std::is_base_of<T, V>::value, "");
+    }
+
+    template <typename T>
+    condition_and_group(condition_and_group<T> const& other)
+        : and_(other.and_.begin(), other.and_.end())
+    {
+        static_assert(std::is_base_of<T, V>::value, "");
+    }
+
+    string toString() const
+    {
+        string s;
+        size_t i = 0;
+        for (condition_t<V> const& cond : and_) {
+            ++i;
+            s += cond.toString();
+            if (i != and_.size())
+                s += " && ";
+        }
+        return s;
+    }
+
+    bool check(V const& value)
+    {
+        for (condition_t<V> & cond : and_) {
+            if (!cond.check(value))
+                return false;
+        }
+        return true;
+    }
+};
+
+// && ||复合查询条件
+// {&A::a == 1 && &A::b < 2 || &A::c > 3}
+// {Cond(&A::a) == 1 && Cond(&A::b) < 2 || Cond(&A::c) > 3}
+template <typename V>
+struct condition_or_group
+{
+    vector<condition_and_group<V>> or_;
+
+    condition_or_group() = default;
+    condition_or_group(condition_or_group const&) = default;
+    condition_or_group(condition_or_group &&) = default;
+    condition_or_group& operator=(condition_or_group const&) = default;
+    condition_or_group& operator=(condition_or_group &&) = default;
+
+    condition_or_group(condition_t<V> const& c1)
+        : or_{condition_and_group<V>{c1}} {}
+
+    condition_or_group(condition_and_group<V> const& g1)
+        : or_{g1} {}
+
+    condition_or_group(condition_and_group<V> const& g1, condition_and_group<V> const& g2)
+        : or_{g1, g2}{}
+
+    template <typename T>
+    condition_or_group(condition_t<T> const& cond)
+        : or_{cond}
+    {
+        static_assert(std::is_base_of<T, V>::value, "");
+    }
+
+    template <typename T>
+    condition_or_group(condition_and_group<T> const& and_group)
+        : or_{and_group}
+    {
+        static_assert(std::is_base_of<T, V>::value, "");
+    }
+
+    template <typename T>
+    condition_or_group(condition_or_group<T> const& other)
+        : or_(other.or_.begin(), other.or_.end())
+    {
+        static_assert(std::is_base_of<T, V>::value, "");
+    }
+
+    string toString() const
+    {
+        string s;
+        size_t i = 0;
+        for (condition_and_group<V> const& and_group : or_) {
+            ++i;
+            s += and_group.toString();
+            if (i != or_.size())
+                s += " || ";
+        }
+        return s;
+    }
+};
+
+namespace detail {
+
+template <typename T1, typename T2, int I>
+struct drived_type_helper;
+
+template <typename T1, typename T2>
+struct drived_type_helper<T1, T2, 0> : public std::enable_if<false, void> {};
+
+template <typename T1, typename T2>
+struct drived_type_helper<T1, T2, 1>
+{
+    typedef T1 type;
+};
+
+template <typename T1, typename T2>
+struct drived_type_helper<T1, T2, 2>
+{
+    typedef T2 type;
+};
+
+} // namespace detail
+
+template <typename T1, typename T2>
+struct drived_type
+{
+    static const int value = std::is_base_of<T1, T2>::value ? 2
+        : (std::is_base_of<T2, T1>::value ? 1 : 0);
+    typedef typename detail::drived_type_helper<T1, T2, value>::type type;
+};
+
+// -------- cond
+// cond && cond
+template <typename V1, typename V2>
+condition_and_group<typename drived_type<V1, V2>::type> operator&&(condition_t<V1> c1, condition_t<V2> c2)
+{
+    typedef typename drived_type<V1, V2>::type T;
+    return condition_and_group<T>(c1, c2);
+}
+
+// cond && and_group
+template <typename V1, typename V2>
+condition_and_group<typename drived_type<V1, V2>::type> operator&&(condition_t<V1> c1, condition_and_group<V2> c2)
+{
+    return c2 && c1;
+}
+
+// cond && or_group
+template <typename V1, typename V2>
+condition_and_group<typename drived_type<V1, V2>::type> operator&&(condition_t<V1> c1, condition_or_group<V2> c2)
+{
+    return c2 && c1;
+}
+
+// cond || cond
+template <typename V1, typename V2>
+condition_or_group<typename drived_type<V1, V2>::type> operator||(condition_t<V1> c1, condition_t<V2> c2)
+{
+    typedef typename drived_type<V1, V2>::type T;
+    return condition_or_group<T>(c1, c2);
+}
+
+// cond || and_group
+template <typename V1, typename V2>
+condition_or_group<typename drived_type<V1, V2>::type> operator||(condition_t<V1> c1, condition_and_group<V2> c2)
+{
+    return c2 || c1;
+}
+
+// cond || or_group
+template <typename V1, typename V2>
+condition_or_group<typename drived_type<V1, V2>::type> operator||(condition_t<V1> c1, condition_or_group<V2> c2)
+{
+    return c2 || c1;
+}
+
+// -------- and_group
+template <typename V>
+inline condition_or_group<V> operator!(condition_and_group<V> c1)
+{
+    condition_or_group<V> or_group;
+    for (condition_t<V> & cond : c1.and_) {
+        or_group.or_.emplace_back(!cond);
+    }
+    return or_group;
+}
+
+// and_group && cond
+template <typename V1, typename V2>
+inline condition_and_group<typename drived_type<V1, V2>::type> operator&&(condition_and_group<V1> c1, condition_t<V2> c2)
+{
+    typedef typename drived_type<V1, V2>::type T;
+    condition_and_group<T> c(c1);
+    c.and_.emplace_back(c2);
+    return c;
+}
+
+// and_group && and_group
+template <typename V1, typename V2>
+inline condition_and_group<typename drived_type<V1, V2>::type> operator&&(condition_and_group<V1> c1, condition_and_group<V2> c2)
+{
+    typedef typename drived_type<V1, V2>::type T;
+    condition_and_group<T> c(c1);
+
+    for (condition_t<V2> & ct : c2.and_) {
+        c.and_.emplace_back(ct);
+    }
+    c2.and_.clear();
+    return c;
+}
+
+// and_group && or_group
+template <typename V1, typename V2>
+inline condition_or_group<typename drived_type<V1, V2>::type> operator&&(condition_and_group<V1> c1, condition_or_group<V2> c2)
+{
+    return c2 && c1;
+}
+
+// and_group || cond
+template <typename V1, typename V2>
+inline condition_or_group<typename drived_type<V1, V2>::type> operator||(condition_and_group<V1> c1, condition_t<V2> c2)
+{
+    typedef typename drived_type<V1, V2>::type T;
+    return condition_or_group<T>(c1, c2);
+}
+
+// and_group || and_group
+template <typename V1, typename V2>
+inline condition_or_group<typename drived_type<V1, V2>::type> operator||(condition_and_group<V1> c1, condition_and_group<V2> c2)
+{
+    typedef typename drived_type<V1, V2>::type T;
+    return condition_or_group<T>(c1, c2);
+}
+
+// and_group || or_group
+template <typename V1, typename V2>
+inline condition_or_group<typename drived_type<V1, V2>::type> operator||(condition_and_group<V1> && c1, condition_or_group<V2> && c2)
+{
+    return c2 || c1;
+}
+
+// -------- or_group
+template <typename V>
+inline condition_or_group<V> operator!(condition_or_group<V> const& c1)
+{
+    condition_or_group<V> or_group;
+    for (condition_and_group<V> const& and_group : c1.or_) {
+        or_group = or_group && !and_group;
+    }
+    return or_group;
+}
+
+// or_group && cond
+template <typename V1, typename V2>
+inline condition_or_group<typename drived_type<V1, V2>::type> operator&&(condition_or_group<V1> c1, condition_t<V2> c2)
+{
+    typedef typename drived_type<V1, V2>::type T;
+    condition_or_group<T> c(c1);
+    for (condition_and_group<T> & ag : c.or_) {
+        ag = ag && c2;
+    }
+    return c;
+}
+
+// or_group && and_group
+template <typename V1, typename V2>
+inline condition_or_group<typename drived_type<V1, V2>::type> operator&&(condition_or_group<V1> c1, condition_and_group<V2> c2)
+{
+    typedef typename drived_type<V1, V2>::type T;
+    condition_or_group<T> c(c1);
+    for (condition_and_group<T> & ag : c.or_) {
+        ag = ag && c2;
+    }
+    return c;
+}
+
+// or_group && or_group
+// todo: test it!
+template <typename V1, typename V2>
+inline condition_or_group<typename drived_type<V1, V2>::type> && operator&&(condition_or_group<V1> c1, condition_or_group<V2> c2)
+{
+    typedef typename drived_type<V1, V2>::type T;
+
+    if (c2.or_.empty())
+        return condition_or_group<T>(c1);
+
+    if (c1.or_.empty())
+        return condition_or_group<T>(c2);
+
+    condition_or_group<T> r;
+    for (condition_and_group<T> & a1 : c1.or_) {
+        for (condition_and_group<T> & a2 : c2.or_) {
+            r.or_.emplace_back(a1 && a2);
+        }
+    }
+    return r;
+}
+
+// or_group || cond
+template <typename V1, typename V2>
+inline condition_or_group<typename drived_type<V1, V2>::type> && operator||(condition_or_group<V1> c1, condition_t<V2> c2)
+{
+    typedef typename drived_type<V1, V2>::type T;
+    condition_or_group<T> c(c1);
+    c.or_.emplace_back(c2);
+    return c;
+}
+
+// or_group || and_group
+template <typename V1, typename V2>
+inline condition_or_group<typename drived_type<V1, V2>::type> && operator||(condition_or_group<V1> c1, condition_and_group<V2> c2)
+{
+    typedef typename drived_type<V1, V2>::type T;
+    condition_or_group<T> c(c1);
+    c.or_.emplace_back(c2);
+    return c;
+}
+
+// or_group || or_group
+template <typename V1, typename V2>
+inline condition_or_group<typename drived_type<V1, V2>::type> && operator||(condition_or_group<V1> c1, condition_or_group<V2> c2)
+{
+    typedef typename drived_type<V1, V2>::type T;
+    condition_or_group<T> c(c1);
+    c.or_.emplace(c2.or_.begin(), c2.or_.end());
+    return c;
+}
+// ------------------ 查询条件
+
+// ------------------ 索引
+// 索引:元信息
+template <typename V>
+struct index_meta_t
+{
+    vector<virtual_column_t<V>> cols;
+
+    index_meta_t() = default;
+    index_meta_t(index_meta_t const&) = default;
+    index_meta_t(index_meta_t &&) = default;
+    index_meta_t& operator=(index_meta_t const&) = default;
+    index_meta_t& operator=(index_meta_t &&) = default;
+
+    template <typename T>
+    index_meta_t(index_meta_t<T> const& other)
+        : cols(other.cols.begin(), other.cols.end())
+    {
+        static_assert(std::is_base_of<T, V>::value, "");
+    }
+
+    friend bool operator<(index_meta_t const& lhs, index_meta_t const& rhs)
+    {
+        for (size_t i = 0; i < (std::min)(lhs.cols.size(), rhs.cols.size()); ++i)
         {
-            for (size_t i = 0; i < (std::min)(lhs.cols.size(), rhs.cols.size()); ++i)
-            {
-                if (lhs.cols[i] < rhs.cols[i]) return true;
-                if (rhs.cols[i] < lhs.cols[i]) return false;
-            }
-            return lhs.cols.size() < rhs.cols.size();
+            if (lhs.cols[i] < rhs.cols[i]) return true;
+            if (rhs.cols[i] < lhs.cols[i]) return false;
         }
+        return lhs.cols.size() < rhs.cols.size();
+    }
 
-        friend bool operator==(index_meta_t const& lhs, index_meta_t const& rhs)
-        {
-            return !(lhs < rhs) && !(rhs < lhs);
-        }
-
-        string toString()
-        {
-            string s("{");
-            for (size_t i = 0; i < cols.size(); ++i) {
-                column_t & col = cols[i];
-                string fieldname = col.fieldname();
-                if (fieldname.empty()) {
-                    s += fmt("offset=%d", (int)col.offset);
-                } else {
-                    s += fieldname;
-                }
-                if (i + 1 < cols.size())
-                    s += ", ";
-            }
-            s += "}";
-            return s;
-        }
-    };
-
-    // 索引:值
-    struct index_value_t
+    friend bool operator==(index_meta_t const& lhs, index_meta_t const& rhs)
     {
-        vector<column_value_t> values;
+        return !(lhs < rhs) && !(rhs < lhs);
+    }
 
-        static index_value_t min(size_t n)
-        {
-            index_value_t ivt;
-            ivt.values.resize(n, column_value_t(LessAny::min_t{}));
-            return ivt;
+    void push_back(virtual_column_t<V> const& col) {
+        cols.push_back(col);
+    }
+
+    template <typename FieldType>
+    void push_back(FieldType V::* memptr) {
+        cols.push_back(virtual_column_t<V>(memptr));
+    }
+
+    template <typename Arg1, typename ... Args>
+    void push_back(Arg1 && arg1, Args && ... args)
+    {
+        push_back(std::forward<Arg1>(arg1));
+        push_back(std::forward<Args>(args)...);
+    }
+
+
+    string toString() const
+    {
+        string s("{");
+        for (size_t i = 0; i < cols.size(); ++i) {
+            virtual_column_t<V> const& col = cols[i];
+            s += col.toString();
+            if (i + 1 < cols.size())
+                s += ", ";
         }
+        s += "}";
+        return s;
+    }
+};
 
-        static index_value_t max(size_t n)
+// 索引:值
+struct index_value_t
+{
+    vector<column_value_t> values;
+
+    static index_value_t min(size_t n)
+    {
+        index_value_t ivt;
+        ivt.values.resize(n, column_value_t(LessAny::min_t{}));
+        return ivt;
+    }
+
+    static index_value_t max(size_t n)
+    {
+        index_value_t ivt;
+        ivt.values.resize(n, column_value_t(LessAny::max_t{}));
+        return ivt;
+    }
+
+    friend bool operator<(index_value_t const& lhs, index_value_t const& rhs)
+    {
+        for (size_t i = 0; i < (std::min)(lhs.values.size(), rhs.values.size()); ++i)
         {
-            index_value_t ivt;
-            ivt.values.resize(n, column_value_t(LessAny::max_t{}));
-            return ivt;
+            if (lhs.values[i] < rhs.values[i]) return true;
+            if (rhs.values[i] < lhs.values[i]) return false;
         }
+        return lhs.values.size() < rhs.values.size();
+    }
 
-        friend bool operator<(index_value_t const& lhs, index_value_t const& rhs)
-        {
-            for (size_t i = 0; i < (std::min)(lhs.values.size(), rhs.values.size()); ++i)
-            {
-                if (lhs.values[i] < rhs.values[i]) return true;
-                if (rhs.values[i] < lhs.values[i]) return true;
-            }
-            return lhs.values.size() < rhs.values.size();
-        }
+    friend bool operator==(index_value_t const& lhs, index_value_t const& rhs)
+    {
+        return !(lhs < rhs) && !(rhs < lhs);
+    }
+};
 
-        friend bool operator==(index_value_t const& lhs, index_value_t const& rhs)
-        {
-            return !(lhs < rhs) && !(rhs < lhs);
-        }
-    };
+// ------------------ order by
+// order by信息
+template <typename V>
+using order_by_t = index_meta_t<V>;
 
+using order_by_value_t = index_value_t;
+
+// order by语法糖
+// ex:
+//   OrderBy(&A::a, &A::b);
+template <typename V, typename FieldType>
+inline void makeOrderBy(order_by_t<V> & ob, FieldType V::* memptr)
+{
+    ob.push_back(memptr);
+}
+
+template <typename V>
+inline void makeOrderBy(order_by_t<V> & ob, virtual_column_t<V> const& vct)
+{
+    ob.push_back(vct);
+}
+
+template <typename V, typename FieldType, typename ... Args>
+inline void makeOrderBy(order_by_t<V> & ob, FieldType V::* memptr, Args && ... args)
+{
+    ob.push_back(memptr);
+    makeOrderBy(ob, std::forward<Args>(args)...);
+}
+
+template <typename V, typename ... Args>
+inline void makeOrderBy(order_by_t<V> & ob, virtual_column_t<V> const& vct, Args && ... args)
+{
+    ob.push_back(vct);
+    makeOrderBy(ob, std::forward<Args>(args)...);
+}
+// ------------------ order by
+
+template <typename V, typename ValueType>
+struct VirtualColumn : public virtual_column_t<V>
+{
+    typedef virtual_column_t<V> base_t;
+
+    VirtualColumn() = default;
+
+    VirtualColumn(base_t const& vct) : base_t(vct) {}
+    VirtualColumn(base_t && vct) : base_t(std::move(vct)) {}
+
+    template <typename T>
+    VirtualColumn(T && vct) : base_t(std::forward<T>(vct)) {}
+
+    static VirtualColumn make(
+            std::function<ValueType(V const&)> const& fn,
+            string const& name = "")
+    {
+        base_t vct = base_t::make(fn, name);
+        return VirtualColumn(vct);
+    }
+
+    using base_t::base_t;
 };
 
 struct Config
@@ -2489,7 +2964,7 @@ struct Config
 };
 
 template <typename K, typename V>
-struct DB : public DB_Base<V>
+struct DB
 {
 public:
     DB() : DB(Config{}) {}
@@ -2501,23 +2976,15 @@ public:
     // 存储引擎
     typedef ShadowHashTable<K, V> data_table_t;
     typedef DB<K, V> this_t;
-    typedef DB_Base<V> base_t;
     typedef typename data_table_t::ref_t ref_t;
-
-    typedef typename base_t::column_value_t column_value_t;
-    typedef typename base_t::column_t column_t;
-    typedef typename base_t::condition_t condition_t;
-    typedef typename base_t::condition_and_group condition_and_group;
-    typedef typename base_t::condition_or_group condition_or_group;
-    typedef typename base_t::index_meta_t index_meta_t;
-    typedef typename base_t::index_value_t index_value_t;
 
     // V*
     class VRefPtr
     {
     public:
         VRefPtr() = default;
-        VRefPtr(this_t* db, ref_t ref) : db_(db), ref_(ref) {}
+        VRefPtr(this_t* db, ref_t ref, V const* debugPtr = nullptr) : db_(db), ref_(ref), ptr_(debugPtr) {}
+        VRefPtr(std::shared_ptr<V> holder) : db_(nullptr), holder_(holder), ptr_(holder.get()) {}
 
         V const& operator*() const
         {
@@ -2534,38 +3001,70 @@ public:
             return !!p();
         }
 
-        string toString()
+        V const* get() const
         {
-            return fmt("VRefPtr{db:0x%p, ref:%s}",
-                    (void*)db_, ref_.toString().c_str());
+            return p();
+        }
+
+        string toString() const
+        {
+            if (db_) {
+                return fmt("VRefPtr{db:0x%p, ref:%s}",
+                        (void*)db_, ref_.toString().c_str());
+            } else {
+                return fmt("VRefPtr{holder:0x%p}", (void*)holder_.get());
+            }
         }
 
     private:
         V* p() const
         {
-            if (!db_) return nullptr;
+            if (!db_) return holder_.get();
 
             ref_t newRef;
             V* ptr = db_->data_.get(ref_, newRef);
             if (ptr) {
                 ref_ = newRef;
             }
+            ptr_ = ptr; // 用于调试
             return ptr;
         }
 
     private:
         this_t* db_ = nullptr;
         mutable ref_t ref_;
+        std::shared_ptr<V> holder_;
+        mutable V const* ptr_ = nullptr;  // 最近一次查询结果, 方便调试用
+    };
+
+    struct IndexMatchInfo
+    {
+        size_t nLeftMatched = 0;    // 最左匹配
+        size_t nMatchedCond = 0;    // 匹配到的条件数量
+        bool   bOrderByMatched = false;  // 能否逐个取结果 (orderby未命中最左前缀时,需要取所有结果排序后才能返回第一个结果)
+
+        friend bool operator<(IndexMatchInfo const& lhs, IndexMatchInfo const& rhs)
+        {
+            if (lhs.bOrderByMatched != rhs.bOrderByMatched) {
+                return lhs.bOrderByMatched < rhs.bOrderByMatched;
+            }
+
+            if (lhs.nLeftMatched != rhs.nLeftMatched) {
+                return lhs.nLeftMatched < rhs.nLeftMatched;
+            }
+
+            return lhs.nMatchedCond < rhs.nMatchedCond;
+        }
     };
 
     // 索引: 元信息+值+数据
     struct index_t
     {
         typedef ShadowRecursiveMapSet<column_value_t, ref_t> map_t;
-        index_meta_t meta;
+        index_meta_t<V> meta;
         map_t data;
 
-        index_t(index_meta_t const& mt) : meta(mt), data(mt.cols.size() - 1) {
+        index_t(index_meta_t<V> const& mt) : meta(mt), data(mt.cols.size() - 1) {
             assert(!mt.cols.empty());
         }
 
@@ -2617,10 +3116,12 @@ public:
                 ref_t out;
                 value = table->get(ref, out);
                 assert(!!value);
-                if (value) {
-                    // 更新ref
-                    std::swap(ref, out);
-                }
+
+                // bugfix: ref可能是底层数据, 修改会影响多个db对象, 多线程场景下可能crash
+//                if (value) {
+//                    // 更新ref
+//                    std::swap(ref, out);
+//                }
 
                 if (indexHintInfo) {
                     ++indexHintInfo->nScanRows;
@@ -2642,7 +3143,7 @@ public:
             data_table_t* table;
             Debugger::IndexHintInfo* indexHintInfo = nullptr;
             typename map_t::condition_iterator it;
-            condition_and_group and_group; // 未命中的索引, 遍历搜索
+            condition_and_group<V> and_group; // 未命中的索引, 遍历搜索
             V* value;
         };
 
@@ -2668,20 +3169,34 @@ public:
         }
 
         // @return: <最左连续匹配长度, 总匹配cond数量>
-        std::pair<size_t, size_t> match(condition_and_group const& and_group)
+        IndexMatchInfo match(condition_and_group<V> const& and_group,
+                order_by_t<V> const& ob)
         {
             bool isLeftMatchedStop = false;
-            size_t nLeftMatched = 0;
-            size_t nMatchedColumn = 0;
-            vector<column_t> & cols = meta.cols;
-            for (column_t & col : cols) {
-                size_t offset = col.offset;
+            IndexMatchInfo matchInfo;
+            vector<virtual_column_t<V>> & cols = meta.cols;
 
+            // 有order by时, 仅能匹配到order by的索引也要能用
+            if (ob.cols.size()) {
+                matchInfo.bOrderByMatched = true;
+                if (cols.size() < ob.cols.size()) {
+                    matchInfo.bOrderByMatched = false;
+                } else {
+                    for (size_t i = 0; i < ob.cols.size(); ++i) {
+                        if (ob.cols[i] != cols[i]) {
+                            matchInfo.bOrderByMatched = false;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            for (virtual_column_t<V> & col : cols) {
                 bool matched = false;
-                for (condition_t const& cond : and_group.and_) {
-                    if (cond.col_.offset == offset)
+                for (condition_t<V> const& cond : and_group.and_) {
+                    if (cond.col_ == col)
                     {
-                        nMatchedColumn++;
+                        matchInfo.nMatchedCond++;
                         matched = true;
                     }
                 }
@@ -2691,10 +3206,11 @@ public:
                 }
 
                 if (!isLeftMatchedStop) {
-                    ++nLeftMatched;
+                    ++matchInfo.nLeftMatched;
                 }
             }
-            return {nLeftMatched, nMatchedColumn};
+
+            return matchInfo;
         }
 
         void setIndex(V const& value, ref_t const& ref)
@@ -2722,12 +3238,12 @@ public:
         }
 
         condition_iterator select(data_table_t* table,
-                condition_and_group const& and_group,
+                condition_and_group<V> const& and_group,
                 Debugger::IndexHintInfo* indexHintInfo)
         {
             std::vector<bool> mask(and_group.and_.size());
 
-            vector<column_t> & cols = meta.cols;
+            vector<virtual_column_t<V>> & cols = meta.cols;
 
             typedef typename map_t::cond_t cond_t;
             typedef typename map_t::condition_vec2_t condv2_t;
@@ -2737,12 +3253,10 @@ public:
 
             // and_group按字段聚合, 转为便于查询的结构: condv2
             for (size_t i = 0; i < cols.size(); ++i) {
-                column_t & col = cols[i];
-                size_t offset = col.offset;
-
+                virtual_column_t<V> & col = cols[i];
                 for (size_t j = 0; j < and_group.and_.size(); ++j) {
-                    condition_t const& cond = and_group.and_[j];
-                    if (cond.col_.offset == offset) {
+                    condition_t<V> const& cond = and_group.and_[j];
+                    if (cond.col_ == col) {
                         // matched
                         (*condv2)[i].emplace_back(cond_t{cond.colValue_, cond.op_});
                         mask[j] = true;
@@ -2764,7 +3278,7 @@ public:
             return std::move(iter);
         }
 
-        string toString(bool simple = false)
+        string toString(bool simple = false) const
         {
             string s;
             s += P("index [cols.size()=%d]", (int)meta.cols.size());
@@ -2774,9 +3288,8 @@ public:
                 s += P("cols:");
                 ++tlsTab();
                 for (size_t i = 0; i < meta.cols.size(); ++i) {
-                    column_t & col = meta.cols[i];
-                    s += P("[%d] %s \t(offset=%d)",
-                            (int)i, col.fieldname().c_str(), (int)col.offset);
+                    virtual_column_t<V> const& col = meta.cols[i];
+                    s += P("[%d] %s", (int)i, col.toString().c_str());
                 }
                 --tlsTab();
             }
@@ -2797,9 +3310,9 @@ public:
     // 索引搜索树
     struct index_tree_t
     {
-        map<index_meta_t, index_ptr_t> indexes;
+        map<index_meta_t<V>, index_ptr_t> indexes;
 
-        index_ptr_t insert(index_meta_t meta)
+        index_ptr_t insert(index_meta_t<V> meta)
         {
             index_ptr_t index = std::make_shared<index_t>(meta);
             auto kv = indexes.insert({index->meta, index});
@@ -2828,27 +3341,29 @@ public:
         }
 
         // 匹配一个最佳索引
-        index_ptr_t match(condition_and_group const& and_group,
+        std::pair<index_ptr_t, IndexMatchInfo> match(condition_and_group<V> const& and_group,
+                order_by_t<V> const& ob,
                 Debugger::OnceIndexQueryTrace* onceQueryTrace)
         {
             index_ptr_t bestIndex = nullptr;
-            std::pair<size_t, size_t> maxMatched {0, 0};
+            IndexMatchInfo bestMatched;
 
             for (auto & kv : indexes) {
                 index_ptr_t & index = kv.second;
-                auto matched = index->match(and_group);
+                auto matched = index->match(and_group, ob);
 
                 if (onceQueryTrace) {
                     onceQueryTrace->tryMatchIndexes.resize(onceQueryTrace->tryMatchIndexes.size() + 1);
                     Debugger::IndexHintInfo & indexHintInfo = onceQueryTrace->tryMatchIndexes.back();
                     indexHintInfo.indexName = index->meta.toString();
-                    indexHintInfo.nLeftMatched = matched.first;
-                    indexHintInfo.nMatchedCond = matched.second;
+                    indexHintInfo.nLeftMatched = matched.nLeftMatched;
+                    indexHintInfo.nMatchedCond = matched.nMatchedCond;
+                    indexHintInfo.bOrderByMatched = matched.bOrderByMatched;
                     indexHintInfo.nForkLevels = index->data.level();
                 }
 
-                if (matched > maxMatched) {
-                    maxMatched = matched;
+                if (bestMatched < matched) {
+                    bestMatched = matched;
                     bestIndex = index;
 
                     if (onceQueryTrace) {
@@ -2857,7 +3372,7 @@ public:
                 }
             }
 
-            return bestIndex;
+            return {bestIndex, bestMatched};
         }
 
         void foreach(std::function<void(index_ptr_t)> pred)
@@ -2887,11 +3402,11 @@ public:
                 });
         }
 
-        string toString(bool simple = false)
+        string toString(bool simple = false) const
         {
             string s;
             int i = 0;
-            foreach([&](index_ptr_t index){
+            const_cast<index_tree_t*>(this)->foreach([&](index_ptr_t index){
                     s += P("[%d]", i++);
                     ++tlsTab();
                     s += index->toString(simple);
@@ -2903,17 +3418,36 @@ public:
     // ------------------ 索引
 
 public:
-    // 传入成员指针列表
+    // 创建虚拟列, 用于创建索引、条件查询
+    // *注意*：仅当创建索引和条件查询用同一个虚拟列对象时, 查询才能命中索引!
+    //
+    //   虚拟列信息不局限于单个DB对象, 类型V相同的DB对象间可以通用
+    // @getter: 用于计算索引值的function
+    // @name: 仅用于debug时输出文字信息, 没有其他作用.
+    // @return: 返回一个虚拟列, 用于创建索引\条件查询
+    template <typename ValueType>
+    VirtualColumn<V, ValueType> makeVirtualColumn(
+            std::function<ValueType(V const&)> const& getter,
+            string const& name = "")
+    {
+        return VirtualColumn<V, ValueType>::make(getter, name);
+    }
+
+    // 传入成员指针列表 / 虚拟列信息列表
     // 例如：
     //   DB<string, A> db;
     //   db.createIndex({&A::a});
     //   db.createIndex({&A::a, &A::b});
-    bool createIndex(vector<column_t> const& cols) {
-        std::set<column_t> unique;
+    // 或：
+    //   VirtualColumn<A, int> vcol = db.makeVirtualColumn([](A const& v) { return v.a % 100; });
+    //   db.createIndex({vcol});
+    //   db.createIndex({vcol, &A::b});
+    bool createIndex(vector<virtual_column_t<V>> const& cols) {
+        std::set<virtual_column_t<V>> unique;
 
-        index_meta_t meta;
+        index_meta_t<V> meta;
 
-        for (column_t const& col : cols) {
+        for (virtual_column_t<V> const& col : cols) {
             if (unique.insert(col).second)
                 meta.cols.push_back(col);
         }
@@ -2924,8 +3458,12 @@ public:
             return false;
         }
 
-        for (column_t const& col : meta.cols)
-            indexedColumns_.insert({col.offset, index});
+        for (virtual_column_t<V> const& col : meta.cols) {
+            if (col.isVirtualColumn())
+                hasVirtualColumns_.push_back(index);
+            else
+                indexedColumns_.insert({col, index});
+        }
 
         data_.foreach([index](K const& key, ref_t const& ref, V* ptr){
                 index->setIndex(*ptr, ref);
@@ -2956,12 +3494,12 @@ public:
         }
 
         indexes_.updateIndex(*oldValue, value, ref);
-        *oldValue = value;
+        data_.set(key, value);  // 先更新索引后set, 避免set改变oldValue指向的值
         return true;
     }
 
     // 只更新部分字段, 在索引比较多的场景下可以有效减少索引重置
-    bool update(K const& key, vector<column_t> const& cols, V const& value) {
+    bool update(K const& key, vector<column_t<V>> const& cols, V const& value) {
         ref_t ref;
         V* oldValue = data_.get(key, ref);
         if (!oldValue) {
@@ -2969,18 +3507,24 @@ public:
         }
 
         std::set<index_ptr_t> indexes;
-        for (column_t const& col : cols) {
-            auto range = indexedColumns_.equal_range(col.offset);
+        for (column_t<V> const& col : cols) {
+            auto range = indexedColumns_.equal_range(col);
             for (auto it = range.first; it != range.second; ++it)
                 indexes.insert(it->second);
         }
 
-        for (index_ptr_t index : indexes)
-            index->updateIndex(*oldValue, value, ref);
+        for (index_ptr_t index : hasVirtualColumns_)
+            indexes.insert(index);
 
-        for (column_t const& col : cols) {
-            col.assign(value, *oldValue);
+        V newValue = *oldValue;
+        for (column_t<V> const& col : cols) {
+            col.assign(value, newValue);
         }
+
+        for (index_ptr_t index : indexes)
+            index->updateIndex(*oldValue, newValue, ref);
+
+        data_.set(key, newValue);  // 先更新索引后set, 避免set改变oldValue指向的值
         return true;
     }
 
@@ -2990,15 +3534,33 @@ public:
         ref_t ref;
         V* oldValue = data_.get(key, ref);
         if (!oldValue) {
-            data_.set(key, value);
             ref_t newRef {key};
             indexes_.setIndex(value, newRef);
+            data_.set(key, value);
             ++size_;
             return true;
         }
 
         indexes_.updateIndex(*oldValue, value, ref);
-        *oldValue = value;
+        data_.set(key, value);
+        return false;
+    }
+
+    // @return: true:首次插入, false:数据已存在,执行变更操作
+    bool set(K const& key, V && value)
+    {
+        ref_t ref;
+        V* oldValue = data_.get(key, ref);
+        if (!oldValue) {
+            ref_t newRef {key};
+            indexes_.setIndex(value, newRef);
+            data_.set(key, std::move(value));
+            ++size_;
+            return true;
+        }
+
+        indexes_.updateIndex(*oldValue, value, ref);
+        data_.set(key, std::move(value));
         return false;
     }
 
@@ -3057,6 +3619,11 @@ public:
                 return cb(key, *ptr);
             });
     }
+    bool foreachRef(const std::function<bool(K const& key, VRefPtr const& ref, V const& value)> &cb) {
+        return data_.foreach([this, cb](K const& key, ref_t const& ref, V* ptr){
+                return cb(key, VRefPtr(this, ref, ptr), *ptr);
+            });
+    }
 
     // 逐个取出select结果的迭代器
     // 注意: 数据有修改时, 迭代器很可能会失效.
@@ -3065,7 +3632,12 @@ public:
     {
     public:
         condition_iterator() = default;
-        explicit condition_iterator(this_t * db) : db(db) {}
+        explicit condition_iterator(this_t * db, order_by_t<V> const& ob) : db(db)
+        {
+            if (!ob.cols.empty()) {
+                obp = std::make_shared<order_by_t<V>>(ob);
+            }
+        }
         
         condition_iterator(condition_iterator &&) = default;
         condition_iterator& operator=(condition_iterator &&) = default;
@@ -3075,12 +3647,17 @@ public:
 
         std::pair<K const*, V const*> & operator*()
         {
-            return value;
+            return v.value;
         }
 
         std::pair<K const*, V const*> * operator->()
         {
-            return &value;
+            return &v.value;
+        }
+
+        ref_t const& ref()
+        {
+            return v.ref;
         }
 
         condition_iterator & operator++()
@@ -3094,73 +3671,228 @@ public:
         explicit operator bool() const { return !isEnd(); }
 
     private:
+        struct value_type
+        {
+            std::pair<K const*, V const*> value;
+            ref_t ref;
+        };
+
+        struct order_iterator_t
+        {
+            enum class iterator_type { none, index, foreach };
+
+            order_iterator_t() = default;
+            order_iterator_t(order_iterator_t &&) = default;
+            order_iterator_t& operator=(order_iterator_t &&) = default;
+
+            explicit order_iterator_t(typename index_t::condition_iterator && it,
+                    std::shared_ptr<order_by_t<V>> const& _obp, size_t _idx)
+                : type(iterator_type::index), indexIter(std::move(it)), obp(_obp), idx(_idx)
+            {
+                resetValue();
+            }
+
+            explicit order_iterator_t(typename data_table_t::iterator && it,
+                    std::shared_ptr<order_by_t<V>> const& _obp, size_t _idx)
+                : type(iterator_type::foreach), foreachIter(std::move(it)), obp(_obp), idx(_idx)
+            {
+                resetValue();
+            }
+
+            bool isForeach()
+            {
+                return iterator_type::foreach == type;
+            }
+
+            friend bool operator<(order_iterator_t const& lhs, order_iterator_t const& rhs)
+            {
+                if (lhs.isEnd() && rhs.isEnd()) return false;
+                if (lhs.isEnd()) return true;
+                if (rhs.isEnd()) return false;
+
+                if (lhs.obp) return lhs.obv < rhs.obv;  // 使用了order by
+                if (lhs.type != rhs.type) return lhs.type < rhs.type;   // index优先
+                return lhs.idx < rhs.idx;   // ||左边的条件先处理
+            }
+
+            value_type & value() { return v; }
+
+            void next() {
+                switch ((int)type) {
+                    case (int)iterator_type::index:
+                        ++indexIter;
+                        break;
+
+                    case (int)iterator_type::foreach:
+                        ++foreachIter;
+                        break;
+
+                    default:
+                        return ;
+                }
+
+                resetValue();
+            }
+
+            bool isEnd() const {
+                switch ((int)type) {
+                    case (int)iterator_type::index:
+                        return indexIter.isEnd();
+
+                    case (int)iterator_type::foreach:
+                        return foreachIter.isEnd();
+
+                    default:
+                        return true;
+                }
+            }
+
+            void resetValue()
+            {
+                if (isEnd())
+                    return ;
+
+                switch ((int)type) {
+                    case (int)iterator_type::index:
+                        v.value.first = &indexIter->key;
+                        v.value.second = indexIter.getValue();
+                        v.ref = *indexIter;
+                        break;
+
+                    case (int)iterator_type::foreach:
+                        v.value.first = &foreachIter->first;
+                        v.value.second = static_cast<V const*>(&foreachIter->second);
+                        v.ref = foreachIter.getRef();
+                        break;
+
+                    default:
+                        return ;
+                }
+
+                resetObv();
+            }
+
+            void resetObv()
+            {
+                if (isEnd())
+                    return ;
+
+                if (obp) {
+                    obv.values.clear();
+                    for (auto & col : obp->cols) {
+                        obv.values.emplace_back(col.getter(*v.value.second));
+                    }
+                }
+            }
+
+            iterator_type type = iterator_type::none;
+            typename index_t::condition_iterator indexIter;
+            typename data_table_t::iterator foreachIter;
+            value_type v;
+            std::shared_ptr<order_by_t<V>> obp;
+            order_by_value_t obv;
+            size_t idx = 0;
+        };
+
         void setBegin()
         {
-            if (!foreachConds.or_.empty()) {
-                foreachIter = db->data_.begin();
-            }
             bEnd = false;
 
-            if (!begin())
+            if (!canStepByStep()) {
+                // order by + foreach: 取出所有数据排序后返回
+                orderM.clear();
+                order_by_value_t obv;
+                while (loopNextWhenInvalidInOrderQ(&obv)) {
+                    orderM.insert({std::move(obv), v});
+                    nextInOrderQ();
+                }
+
+                mIter = orderM.begin();
+            }
+
+            if (!loopNextWhenInvalid())
                 setEnd();
         }
 
-        void setEnd() { bEnd = true; }
+        void setEnd() { 
+            bEnd = true; 
 
-        bool begin()
+            if (queryTrace && !queryTrace->endTimestampUS) {
+                queryTrace->endTimestampUS = Debugger::QueryTrace::us();
+            }
+        }
+
+        bool loopNextWhenInvalid(order_by_value_t * obv = nullptr)
         {
-            while (!indexIters.empty()) {
-                auto & it = indexIters.front();
-                if (!it) {
-                    indexIters.pop_front();
-                    continue;
-                }
-                
-                K const& k = it->key;
-                V const* vp = it.getValue();
-                if (!unique.insert(k).second) {
-                    ++it;
-                    continue;
-                }
+            if (!canStepByStep()) {
+                if (mIter == orderM.end())
+                    return false;
 
-                value = {&k, vp};
+                this->v = mIter->second;
+                if (obv) {
+                    *obv = mIter->first;
+                }
                 return true;
             }
 
-            if (!foreachConds.or_.empty()) {
-                while (foreachIter) {
-                    K const& k = foreachIter->first;
-                    V const* vp = static_cast<V const*>(&foreachIter->second);
+            return loopNextWhenInvalidInOrderQ(obv);
+        }
 
+        bool loopNextWhenInvalidInOrderQ(order_by_value_t * obv = nullptr)
+        {
+            while (!orderQ.empty()) {
+                order_iterator_t & oit = orderQ.top();
+
+                value_type & v = oit.value();
+
+                if (oit.isForeach()) {
                     if (foreachHintInfo) {
                         ++foreachHintInfo->nScanRows;
                     }
 
-                    bool matched = false;
-                    for (condition_and_group & and_group : foreachConds.or_) {
-                        if (and_group.check(*vp))
-                        {
-                            matched = true;
-                            if (foreachHintInfo) {
-                                ++foreachHintInfo->nResultRows;
-                            }
-                            break;
+                    if (!checkForeachConds(v)) {
+                        // 条件不满足
+                        oit.next();
+                        if (!oit.isEnd()) {
+                            orderQ.resetTop();
+                        } else {
+                            orderQ.pop();
                         }
-                    }
-
-                    if (!matched) {
-                        ++foreachIter;
                         continue;
                     }
 
-                    if (!unique.insert(k).second) {
-                        ++foreachIter;
-                        continue;
+                    if (foreachHintInfo) {
+                        ++foreachHintInfo->nResultRows;
                     }
-
-                    value = {&k, vp};
-                    return true;
                 }
+
+                if (!unique.insert(*v.value.first).second) {
+                    // 重复的结果
+                    oit.next();
+                    if (!oit.isEnd()) {
+                        orderQ.resetTop();
+                    } else {
+                        orderQ.pop();
+                    }
+                    continue;
+                }
+
+                // 可用
+                this->v = oit.value();
+                if (obv) {
+                    *obv = oit.obv;
+                }
+                return true;
+            }
+
+            return false;
+        }
+
+        bool checkForeachConds(value_type const& v)
+        {
+            for (condition_and_group<V> & and_group : foreachConds.or_) {
+                if (and_group.check(*v.value.second))
+                    return true;
             }
 
             return false;
@@ -3168,38 +3900,91 @@ public:
 
         void next()
         {
-            if (!indexIters.empty()) {
-                auto & it = indexIters.front();
-                ++it;
-            } else if (!foreachConds.or_.empty()) {
-                ++foreachIter;
-            } else {
-                setEnd();
+            if (isEnd())
                 return ;
+
+            if (!canStepByStep()) {
+                ++mIter;
+            } else {
+                nextInOrderQ();
             }
 
-            if (!begin())
+            if (!loopNextWhenInvalid())
                 setEnd();
+        }
+
+        void nextInOrderQ()
+        {
+            while (!orderQ.empty()) {
+                order_iterator_t & oit = orderQ.top();
+
+                oit.next();
+                if (oit.isEnd()) {
+                    orderQ.pop();
+                    continue;
+                }
+
+                orderQ.resetTop();
+                break;
+            }
+        }
+
+        void push(typename index_t::condition_iterator && it, bool orderByMatched)
+        {
+            if (!it) return ;
+
+            orderQ.push(std::move(it), obp, orderQ.size());
+            if (!orderByMatched) {
+                bOrderByMatched = false;
+            }
+        }
+
+        void push(typename data_table_t::iterator && it, condition_and_group<V> const& and_group)
+        {
+            if (foreachConds.or_.empty() && it) {
+                orderQ.push(std::move(it), obp, orderQ.size());
+            }
+
+            foreachConds.or_.push_back(and_group);
+            bOrderByMatched = false;
+        }
+
+        bool canStepByStep()
+        {
+            return !(obp && !bOrderByMatched);
         }
 
     private:
         friend this_t;
         this_t * db = nullptr;
-        condition_or_group foreachConds;
-        std::list<typename index_t::condition_iterator> indexIters;
-        typename data_table_t::iterator foreachIter;
+        Debugger::QueryTrace* queryTrace = nullptr;
         Debugger::IndexHintInfo* foreachHintInfo = nullptr;
+        condition_or_group<V> foreachConds;
+        bool bOrderByMatched = true;
 
+        std::shared_ptr<order_by_t<V>> obp;
+        Heap<order_iterator_t> orderQ;
+        std::multimap<order_by_value_t, value_type> orderM;
+        typename std::multimap<order_by_value_t, value_type>::iterator mIter;
         std::set<K> unique;
-        std::pair<K const*, V const*> value;
+
+        value_type v;
         bool bEnd = true;
     };
 
-    condition_iterator select(condition_or_group cond, Debugger * dbg = nullptr)
+    condition_iterator select(condition_or_group<V> const& cond, Debugger * dbg = nullptr)
+    {
+        order_by_t<V> ob;
+        return select(cond, ob, dbg);
+    }
+
+    condition_iterator select(condition_or_group<V> cond,
+            order_by_t<V> const& ob, Debugger * dbg = nullptr)
     {
         Debugger::QueryTrace* queryTrace = dbg ? &dbg->queryTrace : nullptr;
         if (queryTrace) {
             queryTrace->or_cond = cond.toString();
+            queryTrace->beginTimestampUS = Debugger::QueryTrace::us();
         }
 
         optimize(cond);
@@ -3210,10 +3995,15 @@ public:
 
         Debugger::OnceIndexQueryTrace* lastForeachQueryTrace = nullptr;
 
-        condition_iterator condIter(this);
+        condition_iterator condIter(this, ob);
+        condIter.queryTrace = queryTrace;
+        if (cond.or_.empty()) {
+            cond.or_.push_back(condition_and_group<V>{});
+        }
+
         for (size_t i = 0; i < cond.or_.size(); ++i)
         {
-            condition_and_group & and_group = cond.or_[i];
+            condition_and_group<V> const& and_group = cond.or_[i];
 
             Debugger::OnceIndexQueryTrace* onceQueryTrace = nullptr;
             Debugger::IndexHintInfo* matchedIndexHintInfo = nullptr;
@@ -3224,20 +4014,21 @@ public:
             }
 
             // 选索引
-            index_ptr_t index = indexes_.match(and_group, onceQueryTrace);
+            std::pair<index_ptr_t, IndexMatchInfo> matched = indexes_.match(and_group, ob, onceQueryTrace);
+            index_ptr_t index = matched.first;
             if (index) {
                 // 在索引上搜索
                 typename index_t::condition_iterator it = index->select(
                         &data_, and_group, matchedIndexHintInfo);
                 if (it) {
-                    condIter.indexIters.emplace_back(std::move(it));
+                    condIter.push(std::move(it), matched.second.bOrderByMatched);
                 }
                 continue;
             }
 
             // 后续遍历搜索
             lastForeachQueryTrace = onceQueryTrace;
-            condIter.foreachConds.or_.push_back(and_group);
+            condIter.push(data_.begin(), and_group);
         }
 
         if (!condIter.foreachConds.or_.empty()) {
@@ -3246,16 +4037,58 @@ public:
                 lastForeachQueryTrace->matched.indexName = "foreach";
                 condIter.foreachHintInfo = &lastForeachQueryTrace->matched;
             }
+
+            if (selectNotMatchIndexNotify_) {
+                selectNotMatchIndexNotify_();
+            }
         }
 
         condIter.setBegin();
         return std::move(condIter);
     }
 
-    std::vector<V const*> selectVector(condition_or_group cond, Debugger * dbg = nullptr)
+    // 迭代器不方便copy, 暂时不做range了
+//    struct condition_range
+//    {
+//        condition_range() {
+//            it.setEnd();
+//            empty.setEnd();
+//        }
+//
+//        condition_range(condition_iterator && cit) : it(std::move(cit)) {
+//            empty.setEnd();
+//        }
+//
+//        condition_iterator & begin()
+//        {
+//            return it;
+//        }
+//
+//        condition_iterator & end()
+//        {
+//            return empty;
+//        }
+//
+//        condition_iterator it;
+//        condition_iterator empty;
+//    };
+//
+//    condition_range selectRange(condition_or_group<V> cond, Debugger * dbg = nullptr)
+//    {
+//        return condition_range(select(cond, dbg));
+//    }
+
+    std::vector<V const*> selectVector(condition_or_group<V> const& cond, Debugger * dbg = nullptr)
+    {
+        order_by_t<V> ob;
+        return selectVector(cond, ob, dbg);
+    }
+
+    std::vector<V const*> selectVector(condition_or_group<V> const& cond,
+            order_by_t<V> const& ob, Debugger * dbg = nullptr)
     {
         std::vector<V const*> result;
-        condition_iterator it = select(cond, dbg);
+        condition_iterator it = select(cond, ob, dbg);
         for (; it; ++it) {
             V const* p = it->second;
             result.push_back(p);
@@ -3263,10 +4096,34 @@ public:
         return result;
     }
 
-    std::vector<V> selectVectorCopy(condition_or_group cond, Debugger * dbg = nullptr)
+    std::vector<VRefPtr> selectVectorRef(condition_or_group<V> const& cond, Debugger * dbg = nullptr)
+    {
+        order_by_t<V> ob;
+        return selectVectorRef(cond, ob, dbg);
+    }
+
+    std::vector<VRefPtr> selectVectorRef(condition_or_group<V> const& cond,
+            order_by_t<V> const& ob, Debugger * dbg = nullptr)
+    {
+        std::vector<VRefPtr> result;
+        condition_iterator it = select(cond, ob, dbg);
+        for (; it; ++it) {
+            result.push_back(VRefPtr(this, it.ref(), it->second));
+        }
+        return result;
+    }
+
+    std::vector<V> selectVectorCopy(condition_or_group<V> const& cond, Debugger * dbg = nullptr)
+    {
+        order_by_t<V> ob;
+        return selectVectorCopy(cond, ob, dbg);
+    }
+
+    std::vector<V> selectVectorCopy(condition_or_group<V> const& cond,
+            order_by_t<V> const& ob, Debugger * dbg = nullptr)
     {
         std::vector<V> result;
-        condition_iterator it = select(cond, dbg);
+        condition_iterator it = select(cond, ob, dbg);
         for (; it; ++it) {
             V const* p = it->second;
             result.push_back(*p);
@@ -3274,91 +4131,54 @@ public:
         return result;
     }
 
-    std::map<K, V const*> selectMap(condition_or_group cond, Debugger * dbg = nullptr)
+    std::map<K, V const*> selectMap(condition_or_group<V> const& cond, Debugger * dbg = nullptr)
+    {
+        order_by_t<V> ob;
+        return selectMap(cond, ob, dbg);
+    }
+
+    std::map<K, V const*> selectMap(condition_or_group<V> const& cond,
+            order_by_t<V> const& ob, Debugger * dbg = nullptr)
     {
         std::map<K, V const*> result;
-        condition_iterator it = select(cond, dbg);
+        condition_iterator it = select(cond, ob, dbg);
         for (; it; ++it) {
             result[*it->first] = it->second;
         }
         return result;
     }
 
-    std::map<K, V> selectMapCopy(condition_or_group cond, Debugger * dbg = nullptr)
+    std::map<K, VRefPtr> selectMapRef(condition_or_group<V> const& cond, Debugger * dbg = nullptr)
     {
-        std::map<K, V> result;
-        condition_iterator it = select(cond, dbg);
+        order_by_t<V> ob;
+        return selectMapRef(cond, ob, dbg);
+    }
+
+    std::map<K, VRefPtr> selectMapRef(condition_or_group<V> const& cond,
+            order_by_t<V> const& ob, Debugger * dbg = nullptr)
+    {
+        std::map<K, VRefPtr> result;
+        condition_iterator it = select(cond, ob, dbg);
         for (; it; ++it) {
-            result[*it->first] = *it->second;
+            result[*it->first] = VRefPtr(this, it.ref(), it->second);
         }
         return result;
     }
 
-    std::vector<V const*> selectVectorOld(condition_or_group cond, Debugger * dbg = nullptr)
+    std::map<K, V> selectMapCopy(condition_or_group<V> const& cond, Debugger * dbg = nullptr)
     {
-        std::map<ref_t, V const*> m;
+        order_by_t<V> ob;
+        return selectMapCopy(cond, ob, dbg);
+    }
 
-        Debugger::QueryTrace* queryTrace = dbg ? &dbg->queryTrace : nullptr;
-        if (queryTrace) {
-            queryTrace->or_cond = cond.toString();
+    std::map<K, V> selectMapCopy(condition_or_group<V> const& cond,
+            order_by_t<V> const& ob, Debugger * dbg = nullptr)
+    {
+        std::map<K, V> result;
+        condition_iterator it = select(cond, ob, dbg);
+        for (; it; ++it) {
+            result[*it->first] = *it->second;
         }
-
-        optimize(cond);
-
-        if (queryTrace) {
-            queryTrace->optimizedCond = cond.toString();
-        }
-
-        for (condition_and_group & and_group : cond.or_)
-        {
-            Debugger::OnceIndexQueryTrace* onceQueryTrace = nullptr;
-            if (queryTrace) {
-                queryTrace->querys.resize(queryTrace->querys.size() + 1);
-                onceQueryTrace = &queryTrace->querys.back();
-            }
-
-            if (onceQueryTrace) {
-                onceQueryTrace->cond = and_group.toString();
-            }
-
-            Debugger::IndexHintInfo* matchedIndexHintInfo = onceQueryTrace ?
-                &onceQueryTrace->matched : nullptr;
-
-            // 选索引
-            index_ptr_t index = indexes_.match(and_group, onceQueryTrace);
-            if (index) {
-                // 在索引上搜索
-                typename index_t::condition_iterator it = index->select(
-                        &data_, and_group, matchedIndexHintInfo);
-                for (; it; ++it) {
-                    m[*it] = it.getValue();
-                }
-                continue;
-            }
-
-            // 遍历搜索
-            if (matchedIndexHintInfo) {
-                matchedIndexHintInfo->indexName = "foreach";
-            }
-
-            foreach([&](K const& key, V const& value) {
-                    if (matchedIndexHintInfo) {
-                        ++ matchedIndexHintInfo->nScanRows;
-                    }
-
-                    if (and_group.check(value)) {
-                        m[ref_t(key)] = &value;
-                        if (matchedIndexHintInfo) {
-                            ++ matchedIndexHintInfo->nResultRows;
-                        }
-                    }
-                    return true;
-                });
-        }
-
-        std::vector<V const*> result;
-        for (auto & kv : m)
-            result.push_back(kv.second);
         return result;
     }
 
@@ -3368,13 +4188,14 @@ public:
     // case3: (A > 2 || B == 3) && (A < 3 || B == 3)
     // case4: (A > 1 && A < 3 && A > 2)
     // other cases...
-    void optimize(condition_or_group & cond)
+    void optimize(condition_or_group<V> & cond)
     {
     }
 
     void fork(DB<K, V> & other)
     {
         other.size_ = size_;
+        other.selectNotMatchIndexNotify_ = selectNotMatchIndexNotify_;
         data_.fork(other.data_);
         indexes_.fork(other.indexes_);
         other.initIndexedColumns();
@@ -3391,7 +4212,14 @@ public:
         indexes_.merge();
     }
 
-    string toString(bool simple = false)
+    // 查询未命中索引时通知callback (foreach执行前)
+    // 可以在callback做'爬堆栈'、'输出日志'、'抛出异常终止本次查询'等等操作
+    void setSelectNotMatchIndexNotify(std::function<void()> const& selectNotMatchIndexNotify)
+    {
+        selectNotMatchIndexNotify_ = selectNotMatchIndexNotify;
+    }
+
+    string toString(bool simple = false) const
     {
         string s;
         s += P("[ShadowDB](0x%p)", (void*)this);
@@ -3419,17 +4247,25 @@ private:
     void initIndexedColumns()
     {
         indexedColumns_.clear();
+        hasVirtualColumns_.clear();
         indexes_.foreach([this](index_ptr_t index) {
-                for (column_t const& col : index->meta.cols)
-                    indexedColumns_.insert({col.offset, index});
+                for (virtual_column_t<V> const& col : index->meta.cols) {
+                    if (col.isVirtualColumn()) {
+                        hasVirtualColumns_.push_back(index);
+                    } else {
+                        indexedColumns_.insert({col, index});
+                    }
+                }
             });
     }
 
 private:
     data_table_t data_;                 // 原始数据
     index_tree_t indexes_;              // 索引
-    multimap<size_t, index_ptr_t> indexedColumns_;      // 索引涉及的列
+    multimap<column_t<V>, index_ptr_t> indexedColumns_;      // 索引涉及的列
+    vector<index_ptr_t> hasVirtualColumns_;      // 包含虚拟列的索引信息
     size_t size_ = 0;
+    std::function<void()> selectNotMatchIndexNotify_;   // 查询未命中索引时通知
 };
 
 // condition语法糖
@@ -3437,15 +4273,48 @@ private:
 //   Cond(&A::a) < 1
 //   Cond(&A::a) < 1 && Cond(&A::b) == 2
 template <typename FieldType, typename V>
-typename DB_Base<V>::template field_t<FieldType>
-Cond(FieldType V::* memptr)
+inline field_t<V, FieldType> Cond(FieldType V::* memptr)
 {
-    typedef typename DB_Base<V>::template field_t<FieldType> ft;
-    return ft(memptr);
+    return field_t<V, FieldType>(memptr);
+}
+
+// condition语法糖(自定义VirtualColumn重载)
+// 注意：用于Cond查找的VirtualColumn, 必须和用于创建索引的VirtualColumn是同一个对象, 才能命中索引查询.
+// ex:
+//   VirtualColumn<A, int> col = VirtualColumn<A, int>::make([](A const& v){ return v.a % 10; });
+//   Cond(col) < 1
+template <typename ValueType, typename V>
+inline field_t<V, ValueType> Cond(VirtualColumn<V, ValueType> & col)
+{
+    if (!col.isValid()) {
+        throw std::logic_error("Invalid column parameter for call ::shadow::Cond");
+    }
+
+    return field_t<V, ValueType>(col);
+}
+
+// order by语法糖
+// ex:
+//   OrderBy(&A::a, &A::b);
+template <typename FieldType, typename V, typename ... Args>
+inline order_by_t<V> OrderBy(FieldType V::* memptr, Args && ... args)
+{
+    order_by_t<V> ob;
+    makeOrderBy(ob, memptr, std::forward<Args>(args)...);
+    return ob;
+}
+
+template <typename ValueType, typename V, typename ... Args>
+inline order_by_t<V> OrderBy(VirtualColumn<V, ValueType> & col, Args && ... args)
+{
+    order_by_t<V> ob;
+    makeOrderBy(ob, col, std::forward<Args>(args)...);
+    return ob;
 }
 
 } // namespace shadow
 
 #ifndef SHADOW_DB_NOT_EXPORT_COND
 using shadow::Cond;
+using shadow::OrderBy;
 #endif

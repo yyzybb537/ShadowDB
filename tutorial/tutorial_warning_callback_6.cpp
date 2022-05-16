@@ -1,4 +1,4 @@
-// ShadowDB ::debug
+// ShadowDB ::一些特殊情况的回调
 #include "ShadowDB.h"
 #include <set>
 #include <string>
@@ -45,36 +45,34 @@ std::vector<ProcessInfo> gData = {
     {{2, 1}, "9e146f96-dff1-427e-9aca-fee5f81fbbb3", "d.cc", 1, "mips-a-1", "192.168.0.1"},
 };
 
-// 下面这个宏, 可以在debug信息中展示具体的字段名
-SHADOW_DB_DEBUG_FIELD(ProcessInfo, scriptVersion);
-
 int main()
 {
     // 创建ShadowDB类, 第一个模板参数是主键类型, 第二个模板参数是存储的数据结构体
     typedef ::shadow::DB<string, ProcessInfo> db_t;
     db_t db;
 
-    // 创建索引
-    db.createIndex({&ProcessInfo::scriptVersion});
+    // 创建联合索引
+    db.createIndex({&ProcessInfo::scriptKey, &ProcessInfo::nodeName});
 
     // 写入数据
     for (ProcessInfo & pi : gData) {
         db.set(pi.processUUID, pi);
     }
 
-    // 查询追踪器
-    // 注意：当使用迭代器模式查询时, Debugger的生命期必须长于迭代器
-    ::shadow::Debugger dbg;
+    // 设置回调:查询未命中索引时被通知
+    db.setSelectNotMatchIndexNotify([]{
+                cout << "warn:查询未命中索引" << endl;
 
-    // 条件查询
-    std::vector<ProcessInfo> result = db.selectVectorCopy(
-            Cond(&ProcessInfo::scriptVersion) >= 3, &dbg);
+                // 除了打印日志, 还可以在这个回调中抛出异常终止本次查询
+                throw std::runtime_error("no index");
+            });
 
-    cout << result[0].processUUID << endl;
-    cout << result[1].processUUID << endl;
-
-    // 打印查询细节
-    cout << dbg.toString() << endl;
+    try {
+        std::vector<ProcessInfo const*> result = db.selectVector(
+                Cond(&ProcessInfo::scriptVersion) >= 3);
+    } catch (std::exception & e) {
+        cout << "selectVector throw ex:" << e.what() << endl;
+    }
 
     return 0;
 }

@@ -75,10 +75,16 @@ struct ProcessInfo {
 
     string toString() const
     {
-        string s;
-        s = ::shadow::fmt("id=%s,script=\"%s\",version=%ld,key=\"%s\",node=\"%s\"",
-                id.toString().c_str(), scriptName.c_str(), scriptVersion, scriptKey.c_str(), nodeName.c_str());
-        return s;
+        return ::shadow::fmt("id=%s,script=\"%s\",version=%ld,key=\"%s\",node=\"%s\"",
+                id.toString().c_str(), scriptName.c_str(), scriptVersion,
+                scriptKey.c_str(), nodeName.c_str());
+    }
+    
+    string toStringAll() const
+    {
+        return ::shadow::fmt("id=%s,uuid=\"%s\",script=\"%s\",version=%ld,key=\"%s\",node=\"%s\"",
+                id.toString().c_str(), processUUID.c_str(), scriptName.c_str(),
+                scriptVersion, scriptKey.c_str(), nodeName.c_str());
     }
 };
 
@@ -88,6 +94,15 @@ SHADOW_DB_DEBUG_FIELD(ProcessInfo, scriptName);
 SHADOW_DB_DEBUG_FIELD(ProcessInfo, scriptVersion);
 SHADOW_DB_DEBUG_FIELD(ProcessInfo, scriptKey);
 SHADOW_DB_DEBUG_FIELD(ProcessInfo, nodeName);
+
+struct ProcessInfoDrived : public ProcessInfo
+{
+    int drived;
+};
+
+void dump(std::vector<ProcessInfo const*> const& r);
+size_t find(std::vector<ProcessInfo> const& data, ProcessInfo const* ppi);
+void dumpFind(std::vector<ProcessInfo> const& data, std::vector<ProcessInfo const*> const& r);
 
 std::vector<ProcessInfo> data1 = {
     {{0, 0}, "11becf19-97fe-4683-9b8e-fc52c933c7bc", "b.cc", 1, "mips-b-1", "192.168.0.1"},
@@ -178,9 +193,10 @@ TEST(shadowdb, simple)
     EXPECT_TRUE(db.createIndex({&ProcessInfo::id, &ProcessInfo::scriptVersion}));
     EXPECT_FALSE(db.createIndex({&ProcessInfo::id, &ProcessInfo::scriptVersion}));
 
-    // 导入数据
+    // 导入数据 (move)
     for (ProcessInfo const& pi : data1) {
-        EXPECT_TRUE(db.set(pi.processUUID, pi));
+        ProcessInfo pic = pi;
+        EXPECT_TRUE(db.set(pi.processUUID, std::move(pic)));
     }
     // 有数据的情况下创建索引
     EXPECT_TRUE(db.createIndex({&ProcessInfo::id}));
@@ -241,7 +257,112 @@ TEST(shadowdb, simple)
         r2ids.insert(ppi->id);
     }
     EXPECT_TRUE(r2ids == expectIds);
-//    cout << "Debugger2:\n" << dbg2.toString() << endl;
+    cout << "db:\n" << db.toString() << endl;
+    cout << "Debugger2:\n" << dbg2.toString() << endl;
+
+    // 空条件查询 (基本等同于foreach)
+    {
+        shadow::Debugger dbg;
+        std::vector<ProcessInfo const*> r = db.selectVector({}, &dbg);
+        EXPECT_EQ(r.size(), 8);
+//        cout << "select({}) dbg:\n" << dbg.toString() << endl;
+//        dump(r);
+    }
+
+//    // range
+//    {
+//        db_t::condition_range range = db.selectRange(Cond(&ProcessInfo::scriptVersion) >= 3 && Cond(&ProcessInfo::scriptVersion) < 5);
+//        IdGroup expectIds {
+//            {0, 2},
+//            {1, 1},
+//            {1, 2},
+//            {2, 0}
+//        };
+//        IdGroup r2ids;
+//        for (auto kv : range) {
+//            ProcessInfo const* ppi = kv.second;
+//            r2ids.insert(ppi->id);
+//        }
+//        EXPECT_TRUE(r2ids == expectIds);
+//    }
+}
+
+// 继承
+TEST(shadowdb, drived)
+{
+    using db_drived_t = shadow::DB<string, ProcessInfoDrived>;
+    db_drived_t db;
+    EXPECT_TRUE(db.createIndex({&ProcessInfoDrived::scriptVersion}));
+
+    ::shadow::column_t<ProcessInfoDrived> colx(&ProcessInfoDrived::drived);
+
+    ::shadow::column_t<ProcessInfo> col(&ProcessInfoDrived::scriptVersion);
+    ::shadow::column_t<ProcessInfoDrived> dcol(col);
+
+    Cond(&ProcessInfoDrived::scriptVersion) > 1;
+    db.select(Cond(&ProcessInfoDrived::scriptVersion) > 1);
+    db.select(Cond(&ProcessInfoDrived::scriptVersion) > 1 && Cond(&ProcessInfoDrived::scriptVersion) < 3);
+    db.select(Cond(&ProcessInfoDrived::scriptVersion) > 1 && Cond(&ProcessInfoDrived::scriptVersion) < 3
+            || Cond(&ProcessInfoDrived::scriptVersion) > 1 && Cond(&ProcessInfoDrived::scriptVersion) < 3);
+
+//    db.select(Cond(&ProcessInfoDrived::scriptVersion) > 1 && Cond(&ProcessInfoDrived::drived) < 3);
+    db.select(Cond(&ProcessInfoDrived::drived) > 1 && Cond(&ProcessInfoDrived::scriptVersion) < 3);
+
+//    db.select(Cond(&ProcessInfoDrived::scriptVersion) > 1 && Cond(&ProcessInfoDrived::drived) < 3
+//            || Cond(&ProcessInfoDrived::scriptVersion) > 1 && Cond(&ProcessInfoDrived::scriptVersion) < 3);
+}
+
+// VRefPtr: selectVectorRef/selectMapRef/VRefPtr(shared_ptr)
+TEST(shadowdb, ref)
+{
+    db_t db;
+
+    // 创建索引, 重复创建返回false
+    EXPECT_TRUE(db.createIndex({&ProcessInfo::scriptVersion}));
+    EXPECT_FALSE(db.createIndex({&ProcessInfo::scriptVersion}));
+    EXPECT_TRUE(db.createIndex({&ProcessInfo::nodeName}));
+    EXPECT_FALSE(db.createIndex({&ProcessInfo::nodeName}));
+
+    // 创建复合索引, 重复创建返回false
+    EXPECT_TRUE(db.createIndex({&ProcessInfo::id, &ProcessInfo::scriptVersion}));
+    EXPECT_FALSE(db.createIndex({&ProcessInfo::id, &ProcessInfo::scriptVersion}));
+
+    // 导入数据
+    for (ProcessInfo const& pi : data1) {
+        EXPECT_TRUE(db.set(pi.processUUID, pi));
+    }
+    // 有数据的情况下创建索引
+    EXPECT_TRUE(db.createIndex({&ProcessInfo::id}));
+
+    cout << db.toString() << endl;
+
+    // 索引查询
+    shadow::Debugger dbg1;
+    std::vector<db_t::VRefPtr> r1 = db.selectVectorRef(
+            Cond(&ProcessInfo::scriptVersion) > 1 && Cond(&ProcessInfo::scriptVersion) < 4,
+            &dbg1);
+    EXPECT_EQ(r1.size(), 2);
+    EXPECT_TRUE(data1[5].check(*r1[0]));
+    EXPECT_TRUE(data1[1].check(*r1[1]));
+    cout << "*r1[0]: " << r1[0]->toStringAll() << endl;
+    cout << "*r1[1]: " << r1[1]->toStringAll() << endl;
+//    cout << "Debugger1:\n" << dbg1.toString() << endl;
+
+    // 只更新部分字段
+    for (ProcessInfo pi : data3) {
+        EXPECT_TRUE(db.update(pi.processUUID, pi));
+    }
+
+    cout << db.toString() << endl;
+    EXPECT_TRUE(data3[5].check(*r1[0]));
+    EXPECT_TRUE(data3[1].check(*r1[1]));
+    cout << "*r1[0]: " << r1[0]->toStringAll() << endl;
+    cout << "*r1[1]: " << r1[1]->toStringAll() << endl;
+
+    std::shared_ptr<ProcessInfo> myPi(new ProcessInfo{data1[0]});
+    db_t::VRefPtr selfHolder(myPi);
+    EXPECT_EQ(selfHolder.get(), myPi.get());
+    EXPECT_TRUE(selfHolder->check(*myPi));
 }
 
 // 测试无索引场景
@@ -291,6 +412,7 @@ TEST(shadowdb, or_condition)
                 ,
                 &dbg);
         EXPECT_EQ(r.size(), 5);
+
         std::set<string> uuidSet;
         for (auto ppi : r) {
             uuidSet.insert(ppi->processUUID);
@@ -507,6 +629,18 @@ TEST(shadowdb, fork_simple)
     EXPECT_EQ(db.size(), data1.size());
     EXPECT_EQ(forked.size(), data1.size());
 
+    // 修改旧数据
+    ProcessInfo const& newPi = data2[0];
+    forked.update(newPi.processUUID, newPi);
+    db_t::VRefPtr dbDataPtr = db.get(newPi.processUUID);
+    db_t::VRefPtr forkedDataPtr = forked.get(newPi.processUUID);
+    EXPECT_TRUE(dbDataPtr->check(data1[0]));
+    EXPECT_FALSE(dbDataPtr->check(data2[0]));
+    EXPECT_TRUE(forkedDataPtr->check(data2[0]));
+
+//    cout << "db:\n" << db.toString() << endl;
+//    cout << "forked:\n" << forked.toString() << endl;
+
     // 写入新数据
     for (ProcessInfo const& pi : g1) {
         EXPECT_TRUE(forked.set(pi.processUUID, pi));
@@ -678,6 +812,338 @@ TEST(shadowdb, fastMerge)
 //    cout << "merged db:\n" << db.toString() << endl;
 }
 
+// 自定义function列索引、查询
+// 命中索引查询、不命中索引查询
+TEST(shadowdb, VirtualColumn_Index_Select)
+{
+    db_t db;
+    ::shadow::VirtualColumn<ProcessInfo, int64_t> scriptVersionMod3 = 
+        db.makeVirtualColumn<int64_t>([](ProcessInfo const& pi) { return pi.scriptVersion % 3; }, "scriptVersionMod3");
+    db.createIndex({scriptVersionMod3});
+
+    ::shadow::VirtualColumn<ProcessInfo, int64_t> scriptVersionMod2 = 
+        db.makeVirtualColumn<int64_t>([](ProcessInfo const& pi) { return pi.scriptVersion % 2; }, "scriptVersionMod2");
+
+    // 导入数据
+    for (ProcessInfo const& pi : data1) {
+        EXPECT_TRUE(db.set(pi.processUUID, pi));
+    }
+
+    EXPECT_EQ(db.forkLevel(), 1);
+
+    {
+        db_t forked;
+        db.fork(forked);
+        EXPECT_EQ(db.forkLevel(), 2);
+        EXPECT_EQ(forked.forkLevel(), 2);
+
+        EXPECT_EQ(db.size(), data1.size());
+        EXPECT_EQ(forked.size(), data1.size());
+    }
+
+    // simple
+    {
+        ::shadow::Debugger dbg;
+        std::vector<ProcessInfo const*> r = db.selectVector(Cond(scriptVersionMod3) > 1, &dbg);
+        EXPECT_EQ(r.size(), 2);
+
+        cout << "--------------------------- simple" << endl;
+        cout << db.toString() << endl;
+        cout << dbg.toString() << endl;
+        cout << "--------------------------- simple" << endl;
+    }
+
+    // not
+    {
+        ::shadow::Debugger dbg;
+        std::vector<ProcessInfo const*> r = db.selectVector(!(Cond(scriptVersionMod3) > 1), &dbg);
+        EXPECT_EQ(r.size(), 6);
+
+        cout << "--------------------------- not" << endl;
+        cout << db.toString() << endl;
+        cout << dbg.toString() << endl;
+        cout << "--------------------------- not" << endl;
+    }
+
+    // ! &&
+    {
+        ::shadow::Debugger dbg;
+        std::vector<ProcessInfo const*> r = db.selectVector(
+                !(Cond(scriptVersionMod3) > 1) && (Cond(scriptVersionMod2) == 1)
+                , &dbg);
+        EXPECT_EQ(r.size(), 6);
+
+        cout << "--------------------------- ! and &&" << endl;
+        cout << db.toString() << endl;
+        cout << dbg.toString() << endl;
+        cout << "--------------------------- ! and &&" << endl;
+    }
+
+    // && ||
+    {
+        ::shadow::Debugger dbg;
+        std::vector<ProcessInfo const*> r = db.selectVector(
+                !(Cond(scriptVersionMod3) > 1) && (Cond(scriptVersionMod2) == 1)
+                || (Cond(&ProcessInfo::scriptVersion) == 8)
+                , &dbg);
+        EXPECT_EQ(r.size(), 7);
+
+        cout << "--------------------------- && and ||" << endl;
+        cout << db.toString() << endl;
+        cout << dbg.toString() << endl;
+        cout << "--------------------------- && and ||" << endl;
+    }
+}
+
+// order by
+TEST(shadowdb, order_by)
+{
+    db_t db;
+    ::shadow::VirtualColumn<ProcessInfo, int64_t> scriptVersionMod3 = 
+        db.makeVirtualColumn<int64_t>([](ProcessInfo const& pi) { return pi.scriptVersion % 3; }, "scriptVersionMod3");
+    db.createIndex({scriptVersionMod3});
+
+    db.createIndex({&ProcessInfo::scriptName, &ProcessInfo::scriptVersion});
+    db.createIndex({&ProcessInfo::scriptName, scriptVersionMod3});
+    db.createIndex({&ProcessInfo::nodeName});
+
+    // 导入数据
+    for (ProcessInfo const& pi : data1) {
+        EXPECT_TRUE(db.set(pi.processUUID, pi));
+    }
+
+    // 1.order by命中索引
+    // 1.1 simple索引
+    {
+        cout << "------------------- 1.1" << endl;
+        ::shadow::Debugger dbg;
+        std::vector<ProcessInfo const*> r = db.selectVector(
+                Cond(&ProcessInfo::nodeName) > "192.168.0.2",
+                OrderBy(&ProcessInfo::nodeName), &dbg);
+        EXPECT_EQ(r.size(), 4);
+        EXPECT_EQ(r[0]->nodeName, "192.168.0.3");
+        EXPECT_EQ(r[1]->nodeName, "192.168.0.3");
+        EXPECT_EQ(r[2]->nodeName, "192.168.0.4");
+        EXPECT_EQ(r[3]->nodeName, "192.168.0.4");
+
+//        cout << dbg.toString() << endl;
+//        dump(r);
+    }
+
+    // 1.2 function索引
+    {
+        cout << "------------------- 1.2" << endl;
+        ::shadow::Debugger dbg;
+        std::vector<ProcessInfo const*> r = db.selectVector(
+                Cond(scriptVersionMod3) >= 1,
+                OrderBy(scriptVersionMod3), &dbg);
+        EXPECT_EQ(r.size(), 7);
+        EXPECT_EQ(r[0]->scriptVersion % 3, 1);
+        EXPECT_EQ(r[1]->scriptVersion % 3, 1);
+        EXPECT_EQ(r[2]->scriptVersion % 3, 1);
+        EXPECT_EQ(r[3]->scriptVersion % 3, 1);
+        EXPECT_EQ(r[4]->scriptVersion % 3, 1);
+        EXPECT_EQ(r[5]->scriptVersion % 3, 2);
+        EXPECT_EQ(r[6]->scriptVersion % 3, 2);
+
+//        cout << dbg.toString() << endl;
+//        dump(r);
+    }
+
+    // 1.3 命中索引的最左前缀
+    {
+        cout << "------------------- 1.3" << endl;
+        ::shadow::Debugger dbg;
+        std::vector<ProcessInfo const*> r = db.selectVector(
+                {},
+                OrderBy(&ProcessInfo::scriptName), &dbg);
+        EXPECT_EQ(r.size(), 8);
+//        EXPECT_EQ(r[0]->nodeName, "192.168.0.3");
+
+//        cout << db.toString() << endl;
+//        cout << dbg.toString() << endl;
+//        dump(r);
+    }
+
+    // 1.4 复合order by
+    {
+        cout << "------------------- 1.4" << endl;
+        ::shadow::Debugger dbg;
+        std::vector<ProcessInfo const*> r = db.selectVector(
+                {},
+                OrderBy(&ProcessInfo::scriptName, &ProcessInfo::scriptVersion), &dbg);
+        EXPECT_EQ(r.size(), 8);
+//        EXPECT_EQ(r[0]->nodeName, "192.168.0.3");
+
+//        cout << db.toString() << endl;
+//        cout << dbg.toString() << endl;
+//        dump(r);
+    }
+
+    // 1.5 (memptr + function)复合order by
+    {
+        cout << "------------------- 1.5" << endl;
+        ::shadow::Debugger dbg;
+        std::vector<ProcessInfo const*> r = db.selectVector(
+                {},
+                OrderBy(&ProcessInfo::scriptName, scriptVersionMod3), &dbg);
+        EXPECT_EQ(r.size(), 8);
+        EXPECT_TRUE(r[0]->check(data1[2]));
+        EXPECT_TRUE(r[1]->check(data1[3]));
+        EXPECT_TRUE(r[2]->check(data1[1]));
+        EXPECT_TRUE(r[3]->check(data1[0]));
+        EXPECT_TRUE(r[4]->check(data1[4]));
+        EXPECT_TRUE(r[5]->check(data1[6]));
+        EXPECT_TRUE(r[6]->check(data1[7]));
+        EXPECT_TRUE(r[7]->check(data1[5]));
+
+//        cout << db.toString() << endl;
+//        cout << dbg.toString() << endl;
+//        dump(r);
+    } 
+    
+    // 1.6 order by未匹配, 但查询条件有一定匹配度
+    {
+        cout << "------------------- 1.6" << endl;
+        ::shadow::Debugger dbg;
+        std::vector<ProcessInfo const*> r = db.selectVector(
+                Cond(scriptVersionMod3) >= 1,
+                OrderBy(&ProcessInfo::scriptKey), &dbg);
+        EXPECT_EQ(r.size(), 7);
+        EXPECT_TRUE(r[0]->check(data1[6]));
+        EXPECT_TRUE(r[1]->check(data1[2]));
+        EXPECT_TRUE(r[2]->check(data1[7]));
+        EXPECT_TRUE(r[3]->check(data1[5]));
+        EXPECT_TRUE(r[4]->check(data1[3]));
+        EXPECT_TRUE(r[5]->check(data1[0]));
+        EXPECT_TRUE(r[6]->check(data1[4]));
+
+//        cout << db.toString() << endl;
+//        cout << dbg.toString() << endl;
+//        dump(r);
+//        dumpFind(data1, r);
+    }
+
+    // 1.7 索引匹配, 但顺序不对
+    {
+        cout << "------------------- 1.7" << endl;
+        ::shadow::Debugger dbg;
+        std::vector<ProcessInfo const*> r = db.selectVector(
+                Cond(scriptVersionMod3) >= 1,
+                OrderBy(&ProcessInfo::scriptVersion, &ProcessInfo::scriptName), &dbg);
+        EXPECT_EQ(r.size(), 7);
+        EXPECT_TRUE(r[0]->check(data1[2]));
+        EXPECT_TRUE(r[1]->check(data1[0]));
+        EXPECT_TRUE(r[2]->check(data1[4]));
+        EXPECT_TRUE(r[3]->check(data1[6]));
+        EXPECT_TRUE(r[4]->check(data1[7]));
+        EXPECT_TRUE(r[5]->check(data1[5]));
+        EXPECT_TRUE(r[6]->check(data1[3]));
+
+//        cout << db.toString() << endl;
+//        cout << dbg.toString() << endl;
+//        dump(r);
+//        dumpFind(data1, r);
+    }
+
+    // 2.order by未命中索引
+    
+    // 2.1 无索引
+    {
+        cout << "------------------- 2.1" << endl;
+        ::shadow::Debugger dbg;
+        std::vector<ProcessInfo const*> r = db.selectVector(
+                Cond(&ProcessInfo::scriptKey) >= "mips-a-2",
+                OrderBy(&ProcessInfo::scriptKey), &dbg);
+        EXPECT_EQ(r.size(), 4);
+        EXPECT_TRUE(r[0]->check(data1[3]));
+        EXPECT_TRUE(r[1]->check(data1[1]));
+        EXPECT_TRUE(r[2]->check(data1[0]));
+        EXPECT_TRUE(r[3]->check(data1[4]));
+
+//        cout << db.toString() << endl;
+//        cout << dbg.toString() << endl;
+//        dump(r);
+//        dumpFind(data1, r);
+    }
+
+    // 2.2 在索引中,但不是最左前缀
+    {
+        cout << "------------------- 2.2" << endl;
+        ::shadow::Debugger dbg;
+        std::vector<ProcessInfo const*> r = db.selectVector(
+                {},
+                OrderBy(&ProcessInfo::scriptVersion), &dbg);
+        EXPECT_EQ(r.size(), 8);
+        EXPECT_TRUE(r[0]->check(data1[0]));
+        EXPECT_TRUE(r[1]->check(data1[7]));
+        EXPECT_TRUE(r[2]->check(data1[2]));
+        EXPECT_TRUE(r[3]->check(data1[6]));
+        EXPECT_TRUE(r[4]->check(data1[4]));
+        EXPECT_TRUE(r[5]->check(data1[5]));
+        EXPECT_TRUE(r[6]->check(data1[1]));
+        EXPECT_TRUE(r[7]->check(data1[3]));
+
+//        cout << db.toString() << endl;
+//        cout << dbg.toString() << endl;
+//        dump(r);
+//        dumpFind(data1, r);
+    }
+
+    // 2.3 索引匹配, 但顺序不对
+    {
+        cout << "------------------- 2.3" << endl;
+        ::shadow::Debugger dbg;
+        std::vector<ProcessInfo const*> r = db.selectVector(
+                {},
+                OrderBy(&ProcessInfo::scriptVersion, &ProcessInfo::scriptName), &dbg);
+        EXPECT_EQ(r.size(), 8);
+        EXPECT_TRUE(r[0]->check(data1[2]));
+        EXPECT_TRUE(r[1]->check(data1[0]));
+        EXPECT_TRUE(r[2]->check(data1[4]));
+        EXPECT_TRUE(r[3]->check(data1[7]));
+        EXPECT_TRUE(r[4]->check(data1[6]));
+        EXPECT_TRUE(r[5]->check(data1[5]));
+        EXPECT_TRUE(r[6]->check(data1[1]));
+        EXPECT_TRUE(r[7]->check(data1[3]));
+
+//        cout << db.toString() << endl;
+//        cout << dbg.toString() << endl;
+//        dump(r);
+//        dumpFind(data1, r);
+    }
+}
+
+void dump(std::vector<ProcessInfo const*> const& r)
+{
+    cout << "->r:" << endl;
+    int i = 0;
+    for (auto ppi : r)
+    {
+        cout << ::shadow::fmt("[%d] %s", i++, ppi->toStringAll().c_str()) << endl;
+    }
+}
+
+size_t find(std::vector<ProcessInfo> const& data, ProcessInfo const* ppi)
+{
+    for (size_t i = 0; i < data.size(); ++i)
+    {
+        if (data[i].check(*ppi))
+            return i;
+    }
+    return -1;
+}
+
+void dumpFind(std::vector<ProcessInfo> const& data, std::vector<ProcessInfo const*> const& r)
+{
+    cout << "->find:" << endl;
+    int i = 0;
+    for (auto ppi : r)
+    {
+        cout << ::shadow::fmt("[%d] %d", i++, (int)find(data, ppi)) << endl;
+    }
+}
+
 void initDB(db_t & db, int nRows, bool bCreateIndex = true, int nLevel = 1)
 {
     for (int i = 0; i < nRows; ++i) {
@@ -765,7 +1231,7 @@ TEST(shadowdb_bench, fork_large)
 //            cout << "db(simple):\n" << db.toString(true) << endl;
 
             cout << "fork " << c << " rows. cost: " << t2 - t1 << "us" << endl;
-            cout << "destroy forked db. cost: " << t2 - t1 << "us" << endl;
+            cout << "destroy forked db. cost: " << t3 - t2 << "us" << endl;
             beforeDestory = us();
         }
         afterDestroy = us();
@@ -864,7 +1330,7 @@ TEST(shadowdb_bench, mainkey)
         20
     };
 
-    int64_t t1, t2, rows;
+    int64_t t1, t2, rows = 0;
     for (int lv : levels) {
         db_t db;
         initDB(db, 100 * 1000, false, lv);
@@ -878,7 +1344,7 @@ TEST(shadowdb_bench, mainkey)
         t1 = ns();
         for (int i = 0; i < 1000; ++i) {
             ProcessInfo pi;
-            rows += db.get(std::to_string(1000), pi);
+            rows += (int)db.get(std::to_string(1000), pi);
         }
         t2 = ns();
         cout << "fork.level=" << lv

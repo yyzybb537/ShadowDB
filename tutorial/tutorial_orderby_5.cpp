@@ -1,4 +1,4 @@
-// ShadowDB ::debug
+// ShadowDB ::支持order by对查询结果进行排序
 #include "ShadowDB.h"
 #include <set>
 #include <string>
@@ -45,36 +45,30 @@ std::vector<ProcessInfo> gData = {
     {{2, 1}, "9e146f96-dff1-427e-9aca-fee5f81fbbb3", "d.cc", 1, "mips-a-1", "192.168.0.1"},
 };
 
-// 下面这个宏, 可以在debug信息中展示具体的字段名
-SHADOW_DB_DEBUG_FIELD(ProcessInfo, scriptVersion);
-
 int main()
 {
     // 创建ShadowDB类, 第一个模板参数是主键类型, 第二个模板参数是存储的数据结构体
     typedef ::shadow::DB<string, ProcessInfo> db_t;
     db_t db;
 
-    // 创建索引
-    db.createIndex({&ProcessInfo::scriptVersion});
+    // 创建联合索引
+    db.createIndex({&ProcessInfo::scriptKey, &ProcessInfo::nodeName});
 
     // 写入数据
     for (ProcessInfo & pi : gData) {
         db.set(pi.processUUID, pi);
     }
 
-    // 查询追踪器
-    // 注意：当使用迭代器模式查询时, Debugger的生命期必须长于迭代器
-    ::shadow::Debugger dbg;
+    // 条件查询的第二个参数可以传入一个order by语句
+    // 注意：order by排序字段要尽量匹配索引最左前缀, 
+    //       才能用迭代器逐个取数据, 否则会把所有数据取完排序再返回.
+    std::vector<ProcessInfo const*> result = db.selectVector(
+            Cond(&ProcessInfo::nodeName) >= "192.168.0.3", OrderBy(&ProcessInfo::scriptKey));
 
-    // 条件查询
-    std::vector<ProcessInfo> result = db.selectVectorCopy(
-            Cond(&ProcessInfo::scriptVersion) >= 3, &dbg);
-
-    cout << result[0].processUUID << endl;
-    cout << result[1].processUUID << endl;
-
-    // 打印查询细节
-    cout << dbg.toString() << endl;
+    cout << result.size() << endl;
+    int i = 0;
+    for (auto pi : result)
+        cout << "[" << i++ << "]" << pi->scriptKey << ", " << pi->nodeName << endl;
 
     return 0;
 }

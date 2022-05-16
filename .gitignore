@@ -2,3 +2,6 @@ unittest/TestShadowDB
 tutorial/simple_1
 tutorial/fork_merge_2
 tutorial/debug_3
+tutorial/function_4
+tutorial/orderby_5
+tutorial/warning_callback_6

@@ -81,7 +81,7 @@ int main()
     cout << result[0]->processUUID << endl;
     cout << result[1]->processUUID << endl;
 
-    // 复合条件查询
+    // 复合条件查询 (支持操作符: < <= == >= > ! !=)
     std::map<string, ProcessInfo const*> result2 = db.selectMap(
             Cond(&ProcessInfo::scriptVersion) >= 3
             && Cond(&ProcessInfo::scriptVersion) < 9

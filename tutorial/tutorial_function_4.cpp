@@ -1,4 +1,4 @@
-// ShadowDB ::debug
+// ShadowDB ::自定义虚拟列做索引\查询条件
 #include "ShadowDB.h"
 #include <set>
 #include <string>
@@ -45,36 +45,45 @@ std::vector<ProcessInfo> gData = {
     {{2, 1}, "9e146f96-dff1-427e-9aca-fee5f81fbbb3", "d.cc", 1, "mips-a-1", "192.168.0.1"},
 };
 
-// 下面这个宏, 可以在debug信息中展示具体的字段名
-SHADOW_DB_DEBUG_FIELD(ProcessInfo, scriptVersion);
-
 int main()
 {
     // 创建ShadowDB类, 第一个模板参数是主键类型, 第二个模板参数是存储的数据结构体
     typedef ::shadow::DB<string, ProcessInfo> db_t;
     db_t db;
 
-    // 创建索引
-    db.createIndex({&ProcessInfo::scriptVersion});
+    // 创建一个虚拟列 (nodeName的最后一个字符)
+    ::shadow::VirtualColumn<ProcessInfo, char> nodeLastChar = db.makeVirtualColumn<char>(
+            [](ProcessInfo const& pi) {
+                return pi.nodeName.empty() ? '0' : pi.nodeName.back();
+            });
+
+    // 用虚拟列创建索引
+    db.createIndex({nodeLastChar});
 
     // 写入数据
     for (ProcessInfo & pi : gData) {
         db.set(pi.processUUID, pi);
     }
 
-    // 查询追踪器
-    // 注意：当使用迭代器模式查询时, Debugger的生命期必须长于迭代器
-    ::shadow::Debugger dbg;
-
-    // 条件查询
+    // 用虚拟列做条件查询
+    // 注意：查询用的虚拟列对象, 必须和创建索引用同一个对象, 查询时才能命中索引
     std::vector<ProcessInfo> result = db.selectVectorCopy(
-            Cond(&ProcessInfo::scriptVersion) >= 3, &dbg);
+            Cond(nodeLastChar) >= '4');
 
     cout << result[0].processUUID << endl;
     cout << result[1].processUUID << endl;
 
-    // 打印查询细节
-    cout << dbg.toString() << endl;
+    // 再创建一个虚拟列, 不做索引, 仅用于查询
+    ::shadow::VirtualColumn<ProcessInfo, int> scriptVersionMod3 = db.makeVirtualColumn<int>(
+            [](ProcessInfo const& pi) {
+                return pi.scriptVersion % 3;
+            });
+
+    // 不命中索引的虚拟列查询
+    std::vector<ProcessInfo> r2 = db.selectVectorCopy(
+            Cond(scriptVersionMod3) == 2);
+    cout << r2[0].processUUID << endl;
+    cout << r2[1].processUUID << endl;
 
     return 0;
 }
