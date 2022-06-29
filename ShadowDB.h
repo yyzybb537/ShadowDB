@@ -1634,8 +1634,9 @@ private:
 
         for (auto & kv : *m)
         {
-            map_t * m = reinterpret_cast<map_t*>(kv.second);
-            clear(m, depth + 1);
+            map_t * next = reinterpret_cast<map_t*>(kv.second);
+            clear(next, depth + 1);
+            delete next;
         }
         m->clear();
     }
