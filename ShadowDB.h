@@ -343,7 +343,7 @@ struct Debugger
 template <
     typename K,
     typename V,
-    template <typename K, typename V> class Table
+    template <typename K1, typename V1> class Table
 >
 struct ShadowBase
 {
@@ -2167,9 +2167,9 @@ struct column_t
 {
     static const size_t kInvalidOffset = -1;
 
-    size_t offset = kInvalidOffset;
-    std::function<column_value_t(V const&)> getter;
-    std::function<void(V const& from, V& to)> assign;
+    typedef std::function<column_value_t(V const&)> GetFn;
+    typedef std::function<bool(column_value_t const&)> GetterHandler;
+    typedef std::function<void(V const& from, V& to)> AssignFn;
 
     column_t() = default;
     column_t(column_t const&) = default;
@@ -2181,12 +2181,12 @@ struct column_t
     column_t(FieldType V::* memptr)
     {
         offset = reinterpret_cast<size_t>(&(((V*)0) ->* memptr));
-        getter = [memptr](V const& v) {
+        getF = [memptr](V const& v) {
             LessAny la;
             la.set(v.*memptr);
             return la;
         };
-        assign = [memptr](V const& from, V & to) {
+        assignF = [memptr](V const& from, V & to) {
             to.*memptr = from.*memptr;
         };
     }
@@ -2203,12 +2203,29 @@ struct column_t
         static_assert(std::is_base_of<T, V>::value, "");
 
         offset = other.offset + offsetVBase<T>();
-        getter = [other](V const& v) {
-            return other.getter(static_cast<T const&>(v));
+        getF = [other](V const& v) {
+            return other.getF(static_cast<T const&>(v));
         };
-        assign = [other](V const& from, V & to) {
-            other.assign(static_cast<T const&>(from), static_cast<V&>(to));
+        assignF = [other](V const& from, V & to) {
+            other.assignF(static_cast<T const&>(from), static_cast<V&>(to));
         };
+    }
+
+    bool get(V const& value, GetterHandler const& handler) const
+    {
+        if (!getF)
+            return false;
+
+        return handler(getF(value));
+    }
+
+    bool assign(V const& from, V& to) const
+    {
+        if (!assignF)
+            return false;
+
+        assignF(from, to);
+        return true;
     }
 
     template <typename VBase>
@@ -2218,7 +2235,7 @@ struct column_t
     }
 
     bool isValid() const {
-        return offset != kInvalidOffset && getter && assign;
+        return offset != kInvalidOffset && getF && assignF;
     }
 
     friend bool operator<(column_t const& lhs, column_t const& rhs) {
@@ -2238,39 +2255,62 @@ struct column_t
         string name = adl::field_to_string<V>(offset);
         return name.empty() ? fmt("offset=%d", (int)offset) : fmt("&%s", name.c_str());
     }
+
+public:
+    size_t offset = kInvalidOffset;
+    GetFn getF;
+    AssignFn assignF;
+};
+
+enum class column_category : uint8_t {
+    native,
+    function,
+    native_one_of,
+    function_one_of
 };
 
 // 虚拟列:元信息
 template <typename V>
 struct virtual_column_t : public column_t<V>
 {
-    std::shared_ptr<int> id;
-    string name;
+    typedef column_t<V> base_t;
+
+    typedef typename base_t::GetterHandler GetterHandler;
+    typedef std::function<bool(V const&, GetterHandler const&)> ForeachGetterFn;
 
     virtual_column_t() = default;
 
-    virtual_column_t(column_t<V> const& base) : column_t<V>(base) {}
-    virtual_column_t(column_t<V> && base) : column_t<V>(std::move(base)) {}
+    virtual_column_t(column_t<V> const& base) : category(column_category::native), column_t<V>(base) {}
+    virtual_column_t(column_t<V> && base) : category(column_category::native), column_t<V>(std::move(base)) {}
 
     template <typename FieldType>
-    virtual_column_t(FieldType V::* memptr) : column_t<V>(memptr) {}
+    virtual_column_t(FieldType V::* memptr) : category(column_category::native), column_t<V>(memptr) {}
 
     template <typename FieldType, typename VBase>
-    virtual_column_t(FieldType VBase::* memptr) : column_t<V>(memptr) {}
+    virtual_column_t(FieldType VBase::* memptr) : category(column_category::native), column_t<V>(memptr) {}
 
     template <typename T>
-    virtual_column_t(virtual_column_t<T> const& ct) : column_t<V>(ct) {}
+    virtual_column_t(virtual_column_t<T> const& ct) : category(ct.category), column_t<V>(ct) {}
 
     template <typename T>
-    virtual_column_t(column_t<T> const& ct) : column_t<V>(ct) {}
+    virtual_column_t(column_t<T> const& ct) : category(column_category::native), column_t<V>(ct) {}
+
+    bool get(V const& value, GetterHandler const& handler) const
+    {
+        if (column_category::native == category || column_category::function == category)
+            return base_t::get(value, handler);
+
+        return foreachGetter(value, handler);
+    }
 
     template <typename T>
     static virtual_column_t make(std::function<T(V const&)> const& fn,
             string const& name = "")
     {
         virtual_column_t vct;
+        vct.category = column_category::function;
         vct.id.reset(new int(0xf));
-        vct.getter = [fn](V const& v) {
+        vct.getF = [fn](V const& v) {
             LessAny la;
             la.set(fn(v));
             return la;
@@ -2279,12 +2319,47 @@ struct virtual_column_t : public column_t<V>
         return vct;
     }
 
-    bool isValid() const {
-        return !!id || column_t<V>::isValid();
+    static virtual_column_t makeOneOf(ForeachGetterFn const& foreachG,
+            string const& name = "")
+    {
+        virtual_column_t vct;
+        vct.category = column_category::function_one_of;
+        vct.id.reset(new int(0xf));
+        vct.foreachGetter = foreachG;
+        vct.name = name;
+        return vct;
     }
 
-    bool isVirtualColumn() const {
-        return !!id;
+    template <typename FieldType>
+    static virtual_column_t makeOneOf(FieldType V::* memptr)
+    {
+        virtual_column_t vct(memptr);
+        vct.category = column_category::native_one_of;
+        vct.foreachGetter = [memptr](V const& v, GetterHandler const& handler) -> bool {
+            for (auto & val : v.*memptr) {
+                LessAny la;
+                la.set(val);
+                if (!handler(la))
+                    return false;
+            }
+            return true;
+        };
+        return vct;
+    }
+
+    template <typename FieldType, typename VBase>
+    static virtual_column_t makeOneOf(FieldType VBase::* memptr)
+    {
+        static_assert(std::is_base_of<V, VBase>::value, "");
+        return makeOneOf(static_cast<FieldType V::*>(memptr));
+    }
+
+    bool isValid() const {
+        return !!id || base_t::isValid();
+    }
+
+    bool isMatchedIndex() const {
+        return base_t::isValid();
     }
 
     friend bool operator<(virtual_column_t const& lhs, virtual_column_t const& rhs) {
@@ -2299,12 +2374,22 @@ struct virtual_column_t : public column_t<V>
 
     string toString() const
     {
-        if (isVirtualColumn()) {
+        if (column_category::native == category) {
+            return base_t::toString();
+        } else if (column_category::function == category || column_category::function_one_of == category) {
             return name;
+        } else if (column_category::native_one_of == category) {
+            return "OneOf(" + base_t::toString() + ")";
         }
 
-        return column_t<V>::toString();
+        return name;
     }
+
+public:
+    column_category category;
+    ForeachGetterFn foreachGetter;
+    std::shared_ptr<int> id;
+    string name;
 };
 
 // ------------------ 查询条件
@@ -2379,23 +2464,41 @@ struct condition_t
 
     bool check(V const& value)
     {
-        // todo: 优化成指针形式的getter
-        column_value_t colValue = col_.getter(value);
-        switch ((int)op_) {
-        case (int)e_cond_op::lt:
-            return colValue < colValue_;
-        case (int)e_cond_op::le:
-            return !(colValue_ < colValue);
-        case (int)e_cond_op::eq:
-            return !(colValue_ < colValue) && !(colValue < colValue_);
-        case (int)e_cond_op::ge:
-            return !(colValue < colValue_);
-        case (int)e_cond_op::gt:
-            return colValue_ < colValue;
+        bool succ = false;
+        col_.get(value, [&, this](column_value_t const& colValue) -> bool {
+                    if (check(colValue)) {
+                        succ = true;
+                        return false;
+                    }
 
-        default:
-        case (int)e_cond_op::ne:
-            return (colValue_ < colValue) || (colValue < colValue_);
+                    return true;
+                });
+        return succ;
+    }
+
+    bool check(column_value_t const& colValue)
+    {
+        // 处理多结果索引时，按照oneOf的方式check, 有任意一个符合条件即可
+        // todo: 优化成指针形式的getter
+        switch ((int)op_) {
+            case (int)e_cond_op::lt:
+                return colValue < colValue_;
+
+            case (int)e_cond_op::le:
+                return !(colValue_ < colValue);
+
+            case (int)e_cond_op::eq:
+                return !(colValue_ < colValue) && !(colValue < colValue_);
+
+            case (int)e_cond_op::ge:
+                return !(colValue < colValue_);
+
+            case (int)e_cond_op::gt:
+                return colValue_ < colValue;
+
+            default:
+            case (int)e_cond_op::ne:
+                return (colValue_ < colValue) || (colValue < colValue_);
         }
     }
 };
@@ -2410,6 +2513,8 @@ struct field_t
 
     // 这里要copy一次, 以免VirtualColumn的内容被move改写
     explicit field_t(virtual_column_t<V> const& col) : col_(col) {}
+
+    operator virtual_column_t<V>() { return col_; }
 
     friend condition_t<V> operator<(field_t field, FieldType value)
     {
@@ -2587,6 +2692,17 @@ template <typename T1, typename T2>
 struct drived_type_helper<T1, T2, 2>
 {
     typedef T2 type;
+};
+
+template <typename T>
+struct one_of_type
+{
+    typedef typename std::remove_cv<
+            typename std::remove_reference<
+                decltype(*std::begin(std::declval<T>()))
+            >::type
+        >::type
+        type;
 };
 
 } // namespace detail
@@ -2898,6 +3014,8 @@ struct index_value_t
     }
 };
 
+typedef std::vector<index_value_t> multi_index_value_t;
+
 // ------------------ order by
 // order by信息
 template <typename V>
@@ -2947,14 +3065,6 @@ struct VirtualColumn : public virtual_column_t<V>
 
     template <typename T>
     VirtualColumn(T && vct) : base_t(std::forward<T>(vct)) {}
-
-    static VirtualColumn make(
-            std::function<ValueType(V const&)> const& fn,
-            string const& name = "")
-    {
-        base_t vct = base_t::make(fn, name);
-        return VirtualColumn(vct);
-    }
 
     using base_t::base_t;
 };
@@ -3159,14 +3269,55 @@ public:
             data.merge();
         }
 
-        index_value_t createValue(V const& value)
+        template <typename F>
+        void foreachIndexValue(V const& value, F const& f)
         {
-            index_value_t ivt;
-            for (auto & col : meta.cols)
+            vector<std::vector<column_value_t>> values(meta.cols.size());
+            size_t n = 1;
+            for (size_t i = 0; i < meta.cols.size(); ++i)
             {
-                ivt.values.push_back(col.getter(value));
+                auto & col = meta.cols[i];
+                meta.cols[i].get(value, [&](column_value_t const& colValue) -> bool {
+                            values[i].emplace_back(colValue);
+                            return true;
+                        });
+                n *= values[i].size();
             }
-            return ivt;
+
+            if (!n)
+                return ;
+
+            // 交叉组合出多个index_value_t
+            vector<int> indexes(values.size(), 0);
+            indexes[0] = -1;
+
+            index_value_t ivt;
+            ivt.values.resize(values.size());
+            for (size_t i = 1; i < values.size(); ++i)
+            {
+                ivt.values[i] = values[i][0];
+            }
+
+            for (size_t k = 0; k < n; ++k)
+            {
+                for (size_t i = 0; i < indexes.size(); ++i)
+                {
+                    if (indexes[i] + 1 < values[i].size()) {
+                        indexes[i]++;
+                        ivt.values[i] = values[i][indexes[i]];
+                        break;
+                    }
+
+                    if (!indexes[i]) {
+                        // 不等于0, 回环, 进位
+                        indexes[i] = 0;
+                        ivt.values[i] = values[i][indexes[i]];
+                        continue;
+                    }
+                }
+
+                f(ivt);
+            }
         }
 
         // @return: <最左连续匹配长度, 总匹配cond数量>
@@ -3216,26 +3367,23 @@ public:
 
         void setIndex(V const& value, ref_t const& ref)
         {
-            index_value_t ivt = createValue(value);
-            data.set(ivt.values, ref);
+            foreachIndexValue(value, [&](index_value_t & ivt){
+                    data.set(ivt.values, ref);
+                });
         }
 
         void delIndex(V const& value, ref_t const& ref)
         {
-            index_value_t ivt = createValue(value);
-            data.del(ivt.values, ref);
+            foreachIndexValue(value, [&](index_value_t & ivt){
+                    data.del(ivt.values, ref);
+                });
         }
 
         void updateIndex(V const& oldValue, V const& newValue, ref_t const& ref)
         {
-            index_value_t oldIvt = createValue(oldValue);
-            index_value_t newIvt = createValue(newValue);
-            if (oldIvt == newIvt) {
-                return ;
-            }
-
-            data.del(oldIvt.values, ref);
-            data.set(newIvt.values, ref);
+            // 优化TODO: index没变化时不操作
+            delIndex(oldValue, ref);
+            setIndex(newValue, ref);
         }
 
         condition_iterator select(data_table_t* table,
@@ -3431,7 +3579,27 @@ public:
             std::function<ValueType(V const&)> const& getter,
             string const& name = "")
     {
-        return VirtualColumn<V, ValueType>::make(getter, name);
+        return VirtualColumn<V, ValueType>(virtual_column_t<V>::make(getter, name));
+    }
+
+    // one_of模式的索引
+    template <typename ValueType>
+    VirtualColumn<V, ValueType> makeVirtualColumn(
+            std::function<vector<ValueType>(V const&)> const& getter,
+            string const& name = "")
+    {
+        typename virtual_column_t<V>::ForeachGetterFn foreachGF = 
+            [getter](V const& v, typename virtual_column_t<V>::GetterHandler const& handler) -> bool {
+                        vector<ValueType> vec = getter(v);
+                        for (auto & val : vec) {
+                            LessAny la;
+                            la.set(val);
+                            if (!handler(la))
+                                return false;
+                        }
+                        return true;
+                    };
+        return VirtualColumn<V, ValueType>(virtual_column_t<V>::makeOneOf(foreachGF, name));
     }
 
     // 传入成员指针列表 / 虚拟列信息列表
@@ -3460,10 +3628,10 @@ public:
         }
 
         for (virtual_column_t<V> const& col : meta.cols) {
-            if (col.isVirtualColumn())
-                hasVirtualColumns_.push_back(index);
-            else
+            if (col.isMatchedIndex())
                 indexedColumns_.insert({col, index});
+            else
+                hasVirtualColumns_.push_back(index);
         }
 
         data_.foreach([index](K const& key, ref_t const& ref, V* ptr){
@@ -3781,7 +3949,13 @@ public:
                 if (obp) {
                     obv.values.clear();
                     for (auto & col : obp->cols) {
-                        obv.values.emplace_back(col.getter(*v.value.second));
+                        // todo: order by OneOf怎么支持?
+                        column_value_t cv;
+                        col.get(*v.value.second, [&](column_value_t const& colValue) -> bool {
+                                    cv = colValue;
+                                    return false;
+                                });
+                        obv.values.emplace_back(std::move(cv));
                     }
                 }
             }
@@ -4251,10 +4425,10 @@ private:
         hasVirtualColumns_.clear();
         indexes_.foreach([this](index_ptr_t index) {
                 for (virtual_column_t<V> const& col : index->meta.cols) {
-                    if (col.isVirtualColumn()) {
-                        hasVirtualColumns_.push_back(index);
-                    } else {
+                    if (col.isMatchedIndex()) {
                         indexedColumns_.insert({col, index});
+                    } else {
+                        hasVirtualColumns_.push_back(index);
                     }
                 }
             });
@@ -4273,6 +4447,8 @@ private:
 // ex:
 //   Cond(&A::a) < 1
 //   Cond(&A::a) < 1 && Cond(&A::b) == 2
+//
+//   cond-&A::a < 1
 template <typename FieldType, typename V>
 inline field_t<V, FieldType> Cond(FieldType V::* memptr)
 {
@@ -4284,6 +4460,8 @@ inline field_t<V, FieldType> Cond(FieldType V::* memptr)
 // ex:
 //   VirtualColumn<A, int> col = VirtualColumn<A, int>::make([](A const& v){ return v.a % 10; });
 //   Cond(col) < 1
+//
+//   cond-col < 1
 template <typename ValueType, typename V>
 inline field_t<V, ValueType> Cond(VirtualColumn<V, ValueType> & col)
 {
@@ -4293,6 +4471,36 @@ inline field_t<V, ValueType> Cond(VirtualColumn<V, ValueType> & col)
 
     return field_t<V, ValueType>(col);
 }
+
+// oneof语法糖
+// ex:
+//   Cond(&A::a) < 1
+//   Cond(&A::a) < 1 && Cond(&A::b) == 2
+//
+//   cond-&A::a < 1
+template <typename ContainerType, typename V>
+inline field_t<V, typename detail::one_of_type<ContainerType>::type> OneOf(ContainerType V::* memptr)
+{
+    typedef typename detail::one_of_type<ContainerType>::type ValueType;
+    return field_t<V, ValueType>(virtual_column_t<V>::makeOneOf(memptr));
+}
+
+struct CondHelper
+{
+    template <typename FieldType, typename V>
+    inline field_t<V, FieldType> operator-(FieldType V::* memptr)
+    {
+        return Cond<FieldType, V>(memptr);
+    }
+
+    template <typename ValueType, typename V>
+    inline field_t<V, ValueType> operator-(VirtualColumn<V, ValueType> & col)
+    {
+        return Cond<ValueType, V>(col);
+    }
+};
+
+static CondHelper cond;
 
 // order by语法糖
 // ex:
@@ -4317,5 +4525,7 @@ inline order_by_t<V> OrderBy(VirtualColumn<V, ValueType> & col, Args && ... args
 
 #ifndef SHADOW_DB_NOT_EXPORT_COND
 using shadow::Cond;
+using shadow::cond;
+using shadow::OneOf;
 using shadow::OrderBy;
 #endif

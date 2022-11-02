@@ -895,6 +895,78 @@ TEST(shadowdb, VirtualColumn_Index_Select)
     }
 }
 
+// OneOf
+TEST(shadowdb, one_of)
+{
+    db_t db;
+    db.createIndex({OneOf(&ProcessInfo::scriptName)});
+
+    ::shadow::VirtualColumn<ProcessInfo, char> oneOfScriptName = 
+        db.makeVirtualColumn<char>([](ProcessInfo const& pi)
+                {
+                    vector<char> vec;
+                    for (char ch : pi.scriptName)
+                        vec.push_back(ch);
+                    return vec;
+                }, "oneOfScriptName");
+    db.createIndex({oneOfScriptName});
+
+    // 导入数据
+    for (ProcessInfo const& pi : data1) {
+        EXPECT_TRUE(db.set(pi.processUUID, pi));
+    }
+
+    /// -------------- OneOf keywards
+    // simple
+    {
+        ::shadow::Debugger dbg;
+        std::vector<ProcessInfo const*> r = db.selectVector(OneOf(&ProcessInfo::scriptName) == 'a', &dbg);
+        EXPECT_EQ(r.size(), 2);
+
+        cout << "--------------------------- simple" << endl;
+        cout << db.toString() << endl;
+        cout << dbg.toString() << endl;
+        cout << "--------------------------- simple" << endl;
+    }
+
+    // simple2 (去重)
+    {
+        ::shadow::Debugger dbg;
+        std::vector<ProcessInfo const*> r = db.selectVector(OneOf(&ProcessInfo::scriptName) == 'c', &dbg);
+        EXPECT_EQ(r.size(), 8);
+
+        cout << "--------------------------- simple2" << endl;
+        cout << db.toString() << endl;
+        cout << dbg.toString() << endl;
+        cout << "--------------------------- simple2" << endl;
+    }
+
+    /// ----------- one_of virtual column
+    // simple
+    {
+        ::shadow::Debugger dbg;
+        std::vector<ProcessInfo const*> r = db.selectVector(Cond(oneOfScriptName) == 'a', &dbg);
+        EXPECT_EQ(r.size(), 2);
+
+        cout << "--------------------------- simple" << endl;
+        cout << db.toString() << endl;
+        cout << dbg.toString() << endl;
+        cout << "--------------------------- simple" << endl;
+    }
+
+    // simple2 (去重)
+    {
+        ::shadow::Debugger dbg;
+        std::vector<ProcessInfo const*> r = db.selectVector(Cond(oneOfScriptName) == 'c', &dbg);
+        EXPECT_EQ(r.size(), 8);
+
+        cout << "--------------------------- simple2" << endl;
+        cout << db.toString() << endl;
+        cout << dbg.toString() << endl;
+        cout << "--------------------------- simple2" << endl;
+    }
+}
+
 // order by
 TEST(shadowdb, order_by)
 {
@@ -1355,4 +1427,3 @@ TEST(shadowdb_bench, mainkey)
     cout << "----------------------------------" << endl;
     cout << "ignore optimized output:" << rows << endl;
 }
-
