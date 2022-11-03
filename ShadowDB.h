@@ -2280,20 +2280,20 @@ struct virtual_column_t : public column_t<V>
 
     virtual_column_t() = default;
 
-    virtual_column_t(column_t<V> const& base) : category(column_category::native), column_t<V>(base) {}
-    virtual_column_t(column_t<V> && base) : category(column_category::native), column_t<V>(std::move(base)) {}
+    virtual_column_t(column_t<V> const& base) : column_t<V>(base), category(column_category::native) {}
+    virtual_column_t(column_t<V> && base) : column_t<V>(std::move(base)), category(column_category::native) {}
 
     template <typename FieldType>
-    virtual_column_t(FieldType V::* memptr) : category(column_category::native), column_t<V>(memptr) {}
+    virtual_column_t(FieldType V::* memptr) : column_t<V>(memptr), category(column_category::native) {}
 
     template <typename FieldType, typename VBase>
-    virtual_column_t(FieldType VBase::* memptr) : category(column_category::native), column_t<V>(memptr) {}
+    virtual_column_t(FieldType VBase::* memptr) : column_t<V>(memptr), category(column_category::native) {}
 
     template <typename T>
-    virtual_column_t(virtual_column_t<T> const& ct) : category(ct.category), column_t<V>(ct) {}
+    virtual_column_t(virtual_column_t<T> const& ct) : column_t<V>(ct), category(ct.category) {}
 
     template <typename T>
-    virtual_column_t(column_t<T> const& ct) : category(column_category::native), column_t<V>(ct) {}
+    virtual_column_t(column_t<T> const& ct) : column_t<V>(ct), category(column_category::native) {}
 
     bool get(V const& value, GetterHandler const& handler) const
     {
@@ -3302,7 +3302,7 @@ public:
             {
                 for (size_t i = 0; i < indexes.size(); ++i)
                 {
-                    if (indexes[i] + 1 < values[i].size()) {
+                    if (indexes[i] + 1 < int(values[i].size())) {
                         indexes[i]++;
                         ivt.values[i] = values[i][indexes[i]];
                         break;
